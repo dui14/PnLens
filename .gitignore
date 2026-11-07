@@ -98,4 +98,5 @@ review/
 spec/
 testing/
 workflow/
-AGENT.md
+AGENTS.md
+docs/
