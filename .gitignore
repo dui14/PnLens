@@ -1,102 +1,50 @@
 # Dependencies
 node_modules/
-src/node_modules/
-.pnp
-.pnp.js
 
-# Next.js Build Output
+# Next.js
 src/.next/
-src/out/
-src/build/
-src/.swc/
-
-# Environment Variables
-.env
-.env.local
-.env.*.local
-.env.development.local
-.env.test.local
-.env.production.local
-src/.env
-src/.env.local
-src/.env.*.local
-keydata.env
-
-# MCP Config
-.vscode\mcp.json
-
-# TypeScript Build Cache
 src/tsconfig.tsbuildinfo
-*.tsbuildinfo
 
-# Supabase Local Dev
-.supabase/
-supabase/.branches/
-supabase/.temp/
+# Env
+.env
+.env.*
+keydata.env
+src/.env
+src/.env.*
 
-.vscode
+# Local tooling
+.vscode/
+.cursor/
+mcp.json
+**/*mcp.json
 
-# pnpm
-.pnpm-debug.log*
-.pnpm-store/
-
-# Logs
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-lerna-debug.log*
-logs/
-*.log.*
-
-# OS Generated Files
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
-desktop.ini
-
-# Editor / IDE
-.idea/
-.fleet/
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
-
-.vscode/settings.json
-.vscode/*.code-workspace
-.vscode/launch.json
-
-# Testing & Coverage
-coverage/
-.nyc_output/
-playwright-report/
-test-results/
-
-# Misc
-*.pem
-*.key
-*.cert
-
-# Markdown
-.github/copilot-instructions.md
-agents/
-ai/
+# Context 
 ai-context/
-api/
-backend/
-frontend/
 database/
 diagram/
-review/
-spec/
-testing/
-workflow/
+.agents/
 AGENTS.md
-docs/
+.github/copilot-instructions.md
+
+# Tests under src
+src/**/__tests__/
+src/**/test/
+src/**/tests/
+src/**/*.test.ts
+src/**/*.test.tsx
+src/**/*.spec.ts
+src/**/*.spec.tsx
+
+# Markdown, keep the two published docs
+**/*.md
+!README.md
+!docs/ARCHITECTURE.md
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Tool logs
+pnpm-debug.log*
+npm-debug.log*
