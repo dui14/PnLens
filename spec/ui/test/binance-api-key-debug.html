@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Binance API Key Debug</title>
+  <style>
+    :root {
+      --bg1: #0b1726;
+      --bg2: #0f2a43;
+      --card: rgba(255, 255, 255, 0.08);
+      --stroke: rgba(255, 255, 255, 0.2);
+      --text: #eef4ff;
+      --muted: #b7c4dc;
+      --ok: #2dd4bf;
+      --warn: #f59e0b;
+      --err: #f97373;
+      --accent: #f5c842;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(1200px 700px at 10% 10%, #1f3f61 0%, transparent 60%),
+        radial-gradient(900px 600px at 85% 25%, #1b314a 0%, transparent 55%),
+        linear-gradient(135deg, var(--bg1), var(--bg2));
+      display: grid;
+      place-items: center;
+      padding: 24px;
+    }
+
+    .panel {
+      width: min(920px, 100%);
+      border: 1px solid var(--stroke);
+      border-radius: 16px;
+      background: var(--card);
+      backdrop-filter: blur(8px);
+      padding: 20px;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.35);
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: 24px;
+      letter-spacing: 0.2px;
+    }
+
+    .sub {
+      margin: 0 0 18px;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+    }
+
+    @media (min-width: 860px) {
+      .grid {
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+
+    label {
+      display: block;
+      font-size: 13px;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+
+    input {
+      width: 100%;
+      padding: 12px 12px;
+      border-radius: 10px;
+      border: 1px solid var(--stroke);
+      background: rgba(3, 9, 20, 0.55);
+      color: var(--text);
+      outline: none;
+      transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    }
+
+    input:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(245, 200, 66, 0.2);
+    }
+
+    .actions {
+      margin-top: 16px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    button {
+      border: 1px solid transparent;
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-size: 14px;
+      font-weight: 600;
+      color: #09111f;
+      background: var(--accent);
+      cursor: pointer;
+      transition: transform 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
+    }
+
+    button:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 10px 20px rgba(0, 0, 0, 0.25);
+    }
+
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      transform: none;
+      box-shadow: none;
+    }
+
+    .ghost {
+      color: var(--text);
+      background: transparent;
+      border-color: var(--stroke);
+    }
+
+    .status {
+      margin-top: 14px;
+      border: 1px solid var(--stroke);
+      border-radius: 12px;
+      padding: 12px;
+      background: rgba(4, 12, 22, 0.5);
+      font-size: 14px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .ok { color: var(--ok); }
+    .warn { color: var(--warn); }
+    .err { color: var(--err); }
+
+    .log {
+      margin-top: 12px;
+      max-height: 300px;
+      overflow: auto;
+      border: 1px solid var(--stroke);
+      border-radius: 12px;
+      padding: 12px;
+      background: rgba(4, 12, 22, 0.65);
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 13px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+  <main class="panel">
+    <h1>Binance API Key Read-Only Debug</h1>
+    <p class="sub">
+      Trang nay test nhanh ket noi key read-only voi endpoint <strong>/api/v3/account</strong>.
+      Key/secret chi dung trong bo nho trinh duyet o phien hien tai.
+    </p>
+
+    <section class="grid">
+      <div>
+        <label for="baseUrl">Base URL</label>
+        <input id="baseUrl" value="https://api.binance.com" />
+      </div>
+
+      <div>
+        <label for="proxyUrl">Proxy URL (optional, de vuot CORS khi test local)</label>
+        <input id="proxyUrl" value="https://corsproxy.io/?" />
+      </div>
+
+      <div>
+        <label for="recvWindow">recvWindow (ms)</label>
+        <input id="recvWindow" type="number" min="1000" max="60000" value="5000" />
+      </div>
+
+      <div>
+        <label for="apiKey">BINANCE_API_KEY</label>
+        <input id="apiKey" autocomplete="off" spellcheck="false" />
+      </div>
+
+      <div>
+        <label for="apiSecret">BINANCE_API_KEY_SECRET</label>
+        <input id="apiSecret" type="password" autocomplete="off" spellcheck="false" />
+      </div>
+    </section>
+
+    <div style="margin-top:10px; display:flex; gap:8px; align-items:center; color:var(--muted); font-size:13px;">
+      <input id="useProxy" type="checkbox" checked style="width:auto;" />
+      <label for="useProxy" style="margin:0;">Dung proxy de test signed endpoint trong browser local</label>
+    </div>
+
+    <div class="actions">
+      <button id="btnPing">Test Public Ping</button>
+      <button id="btnServerTime">Test Server Time</button>
+      <button id="btnAccount">Test Read-Only Account</button>
+      <button id="btnClear" class="ghost">Clear Log</button>
+      <button id="btnMask" class="ghost">Toggle Show Secret</button>
+    </div>
+
+    <div id="status" class="status">San sang debug.</div>
+    <div id="log" class="log"></div>
+  </main>
+
+  <script>
+    const ui = {
+      baseUrl: document.getElementById('baseUrl'),
+      proxyUrl: document.getElementById('proxyUrl'),
+      useProxy: document.getElementById('useProxy'),
+      recvWindow: document.getElementById('recvWindow'),
+      apiKey: document.getElementById('apiKey'),
+      apiSecret: document.getElementById('apiSecret'),
+      btnPing: document.getElementById('btnPing'),
+      btnServerTime: document.getElementById('btnServerTime'),
+      btnAccount: document.getElementById('btnAccount'),
+      btnClear: document.getElementById('btnClear'),
+      btnMask: document.getElementById('btnMask'),
+      status: document.getElementById('status'),
+      log: document.getElementById('log')
+    };
+
+    const enc = new TextEncoder();
+
+    function mask(value) {
+      if (!value) return '(empty)';
+      if (value.length <= 8) return '*'.repeat(value.length);
+      return value.slice(0, 4) + '*'.repeat(value.length - 8) + value.slice(-4);
+    }
+
+    function pushLog(title, payload) {
+      const stamp = new Date().toISOString();
+      const body = typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2);
+      ui.log.textContent += `[${stamp}] ${title}\n${body}\n\n`;
+      ui.log.scrollTop = ui.log.scrollHeight;
+    }
+
+    function setStatus(message, mode) {
+      ui.status.className = 'status';
+      if (mode === 'ok') ui.status.classList.add('ok');
+      if (mode === 'warn') ui.status.classList.add('warn');
+      if (mode === 'err') ui.status.classList.add('err');
+      ui.status.textContent = message;
+    }
+
+    async function hmacSha256Hex(secret, query) {
+      const key = await crypto.subtle.importKey(
+        'raw',
+        enc.encode(secret),
+        { name: 'HMAC', hash: 'SHA-256' },
+        false,
+        ['sign']
+      );
+      const sig = await crypto.subtle.sign('HMAC', key, enc.encode(query));
+      return Array.from(new Uint8Array(sig)).map((b) => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    function normalizeBinanceBaseUrl(input) {
+      const raw = (input || '').trim();
+      if (!raw) return 'https://api.binance.com';
+      return raw.replace(/\/+$/, '');
+    }
+
+    function normalizeProxyUrl(input) {
+      const raw = (input || '').trim();
+      if (!raw) return '';
+      return raw;
+    }
+
+    function buildRequestUrl(url) {
+      if (!ui.useProxy.checked) return url;
+      const proxyUrl = normalizeProxyUrl(ui.proxyUrl.value);
+      if (!proxyUrl) return url;
+      return `${proxyUrl}${encodeURIComponent(url)}`;
+    }
+
+    async function fetchJson(url, options = {}) {
+      const requestUrl = buildRequestUrl(url);
+      const res = await fetch(requestUrl, options);
+      const text = await res.text();
+      let data;
+      try {
+        data = text ? JSON.parse(text) : null;
+      } catch {
+        data = text;
+      }
+      return {
+        ok: res.ok,
+        status: res.status,
+        data,
+        requestUrl,
+        headers: Object.fromEntries(res.headers.entries())
+      };
+    }
+
+    function guessFixHints(code, msg) {
+      const hints = [];
+      if (code === -1021) hints.push('Lech thoi gian. Dong bo gio may tinh, tang recvWindow, hoac lay server time truoc khi ky.');
+      if (code === -1022) hints.push('Sai signature. Kiem tra query string, timestamp, HMAC SHA256 va secret.');
+      if (code === -2014 || code === -2015) hints.push('API key/secret sai, key bi vo hieu hoa, hoac IP whitelist khong trung.');
+      if (code === -1102) hints.push('Thieu tham so bat buoc.');
+      if (typeof msg === 'string' && msg.toLowerCase().includes('failed to fetch')) {
+        hints.push('Trinh duyet bi CORS khi goi signed endpoint. Hay bat proxy hoac goi qua backend API route.');
+      }
+      if (typeof msg === 'string' && msg.toLowerCase().includes('cors')) {
+        hints.push('Bi CORS tren browser. Hay bat proxy hoac test qua backend API route de tranh CORS.');
+      }
+      return hints;
+    }
+
+    async function testPing() {
+      const baseUrl = normalizeBinanceBaseUrl(ui.baseUrl.value);
+      setStatus('Dang goi /api/v3/ping ...', 'warn');
+      try {
+        const result = await fetchJson(`${baseUrl}/api/v3/ping`);
+        pushLog('PING_RESULT', result);
+        if (!result.ok) {
+          setStatus(`Ping that bai HTTP ${result.status}`, 'err');
+          return;
+        }
+        setStatus('Ping thanh cong.', 'ok');
+      } catch (error) {
+        pushLog('PING_ERROR', String(error));
+        setStatus(`Ping loi: ${String(error)}`, 'err');
+      }
+    }
+
+    async function testServerTime() {
+      const baseUrl = normalizeBinanceBaseUrl(ui.baseUrl.value);
+      setStatus('Dang goi /api/v3/time ...', 'warn');
+      try {
+        const result = await fetchJson(`${baseUrl}/api/v3/time`);
+        pushLog('SERVER_TIME_RESULT', result);
+        if (!result.ok) {
+          setStatus(`Server time that bai HTTP ${result.status}`, 'err');
+          return;
+        }
+        const serverTime = result.data?.serverTime;
+        const localTime = Date.now();
+        const delta = typeof serverTime === 'number' ? localTime - serverTime : null;
+        setStatus(`Server time OK. Lech local - server: ${delta} ms`, 'ok');
+      } catch (error) {
+        pushLog('SERVER_TIME_ERROR', String(error));
+        setStatus(`Server time loi: ${String(error)}`, 'err');
+      }
+    }
+
+    async function testAccountReadOnly() {
+      const apiKey = ui.apiKey.value.trim();
+      const apiSecret = ui.apiSecret.value.trim();
+      const baseUrl = normalizeBinanceBaseUrl(ui.baseUrl.value);
+      const recvWindow = Number(ui.recvWindow.value || 5000);
+
+      if (!apiKey || !apiSecret) {
+        setStatus('Can nhap day du API key va secret.', 'err');
+        return;
+      }
+
+      setStatus('Dang test /api/v3/account ...', 'warn');
+      pushLog('KEY_INFO', {
+        apiKeyMasked: mask(apiKey),
+        secretMasked: mask(apiSecret),
+        recvWindow,
+        baseUrl,
+        useProxy: ui.useProxy.checked,
+        proxyUrl: normalizeProxyUrl(ui.proxyUrl.value)
+      });
+
+      try {
+        const timestamp = Date.now();
+        const query = `recvWindow=${encodeURIComponent(String(recvWindow))}&timestamp=${encodeURIComponent(String(timestamp))}`;
+        const signature = await hmacSha256Hex(apiSecret, query);
+        const url = `${baseUrl}/api/v3/account?${query}&signature=${signature}`;
+
+        const result = await fetchJson(url, {
+          method: 'GET',
+          headers: { 'X-MBX-APIKEY': apiKey }
+        });
+
+        pushLog('ACCOUNT_RESULT', result);
+
+        if (result.ok) {
+          const canTrade = result.data?.canTrade;
+          const canWithdraw = result.data?.canWithdraw;
+          const canDeposit = result.data?.canDeposit;
+          setStatus(`Ket noi thanh cong. canTrade=${canTrade}, canWithdraw=${canWithdraw}, canDeposit=${canDeposit}`, 'ok');
+          return;
+        }
+
+        const code = result.data?.code;
+        const msg = result.data?.msg;
+        const hints = guessFixHints(code, msg);
+        setStatus(`That bai HTTP ${result.status}. Binance code=${code ?? 'N/A'}`, 'err');
+        if (hints.length) {
+          pushLog('DEBUG_HINTS', hints);
+        }
+      } catch (error) {
+        const message = String(error);
+        const hints = guessFixHints(null, message);
+        pushLog('ACCOUNT_ERROR', { message, hints });
+        if (hints.length) {
+          setStatus(`Loi khong xac dinh: ${message} | ${hints.join(' ')}`, 'err');
+        } else {
+          setStatus(`Loi khong xac dinh: ${message}`, 'err');
+        }
+      }
+    }
+
+    function setBusy(isBusy) {
+      ui.btnPing.disabled = isBusy;
+      ui.btnServerTime.disabled = isBusy;
+      ui.btnAccount.disabled = isBusy;
+    }
+
+    ui.btnPing.addEventListener('click', async () => {
+      setBusy(true);
+      try {
+        await testPing();
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    ui.btnServerTime.addEventListener('click', async () => {
+      setBusy(true);
+      try {
+        await testServerTime();
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    ui.btnAccount.addEventListener('click', async () => {
+      setBusy(true);
+      try {
+        await testAccountReadOnly();
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    ui.btnClear.addEventListener('click', () => {
+      ui.log.textContent = '';
+      setStatus('Da clear log.', 'warn');
+    });
+
+    ui.btnMask.addEventListener('click', () => {
+      ui.apiSecret.type = ui.apiSecret.type === 'password' ? 'text' : 'password';
+    });
+  </script>
+</body>
+</html>

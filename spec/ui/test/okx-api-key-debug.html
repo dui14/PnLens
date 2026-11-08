@@ -1,0 +1,460 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OKX API Key Debug</title>
+  <style>
+    :root {
+      --bg1: #06111f;
+      --bg2: #102843;
+      --card: rgba(255, 255, 255, 0.08);
+      --stroke: rgba(255, 255, 255, 0.22);
+      --text: #eef4ff;
+      --muted: #b7c4dc;
+      --ok: #2dd4bf;
+      --warn: #f59e0b;
+      --err: #f97373;
+      --accent: #22c1ff;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(1100px 680px at 12% 8%, #143a64 0%, transparent 58%),
+        radial-gradient(860px 560px at 88% 26%, #183250 0%, transparent 55%),
+        linear-gradient(145deg, var(--bg1), var(--bg2));
+      display: grid;
+      place-items: center;
+      padding: 24px;
+    }
+
+    .panel {
+      width: min(940px, 100%);
+      border: 1px solid var(--stroke);
+      border-radius: 16px;
+      background: var(--card);
+      backdrop-filter: blur(8px);
+      padding: 20px;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.35);
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: 24px;
+      letter-spacing: 0.2px;
+    }
+
+    .sub {
+      margin: 0 0 18px;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+    }
+
+    @media (min-width: 860px) {
+      .grid {
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+
+    label {
+      display: block;
+      font-size: 13px;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+
+    input {
+      width: 100%;
+      padding: 12px;
+      border-radius: 10px;
+      border: 1px solid var(--stroke);
+      background: rgba(3, 9, 20, 0.55);
+      color: var(--text);
+      outline: none;
+      transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    }
+
+    input:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(34, 193, 255, 0.2);
+    }
+
+    .actions {
+      margin-top: 16px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    button {
+      border: 1px solid transparent;
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-size: 14px;
+      font-weight: 600;
+      color: #07101d;
+      background: var(--accent);
+      cursor: pointer;
+      transition: transform 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
+    }
+
+    button:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 10px 20px rgba(0, 0, 0, 0.25);
+    }
+
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      transform: none;
+      box-shadow: none;
+    }
+
+    .ghost {
+      color: var(--text);
+      background: transparent;
+      border-color: var(--stroke);
+    }
+
+    .status {
+      margin-top: 14px;
+      border: 1px solid var(--stroke);
+      border-radius: 12px;
+      padding: 12px;
+      background: rgba(4, 12, 22, 0.5);
+      font-size: 14px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .ok { color: var(--ok); }
+    .warn { color: var(--warn); }
+    .err { color: var(--err); }
+
+    .log {
+      margin-top: 12px;
+      max-height: 300px;
+      overflow: auto;
+      border: 1px solid var(--stroke);
+      border-radius: 12px;
+      padding: 12px;
+      background: rgba(4, 12, 22, 0.65);
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 13px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+  <main class="panel">
+    <h1>OKX API Key Read-Only Debug</h1>
+    <p class="sub">
+      Trang nay test nhanh key OKX read-only qua endpoint <strong>/api/v5/account/balance</strong>.
+      Browser local thuong gap CORS voi signed endpoint, co the bat proxy ben duoi.
+    </p>
+
+    <section class="grid">
+      <div>
+        <label for="baseUrl">Base URL</label>
+        <input id="baseUrl" value="https://www.okx.com" />
+      </div>
+
+      <div>
+        <label for="proxyUrl">Proxy URL (optional)</label>
+        <input id="proxyUrl" value="https://corsproxy.io/?" />
+      </div>
+
+      <div>
+        <label for="apiKey">OKX_API_KEY</label>
+        <input id="apiKey" autocomplete="off" spellcheck="false" />
+      </div>
+
+      <div>
+        <label for="apiSecret">OKX_API_SECRET</label>
+        <input id="apiSecret" type="password" autocomplete="off" spellcheck="false" />
+      </div>
+
+      <div>
+        <label for="passphrase">OKX_API_PASSPHRASE</label>
+        <input id="passphrase" type="password" autocomplete="off" spellcheck="false" />
+      </div>
+
+      <div>
+        <label for="ccy">Currency filter (optional)</label>
+        <input id="ccy" value="USDT" />
+      </div>
+    </section>
+
+    <div style="margin-top:10px; display:flex; gap:8px; align-items:center; color:var(--muted); font-size:13px;">
+      <input id="useProxy" type="checkbox" checked style="width:auto;" />
+      <label for="useProxy" style="margin:0;">Dung proxy de test signed endpoint trong browser local</label>
+    </div>
+
+    <div class="actions">
+      <button id="btnPublicTime">Test Public Time</button>
+      <button id="btnAccount">Test Read-Only Account</button>
+      <button id="btnClear" class="ghost">Clear Log</button>
+      <button id="btnMask" class="ghost">Toggle Show Secret</button>
+    </div>
+
+    <div id="status" class="status">San sang debug.</div>
+    <div id="log" class="log"></div>
+  </main>
+
+  <script>
+    const ui = {
+      baseUrl: document.getElementById('baseUrl'),
+      proxyUrl: document.getElementById('proxyUrl'),
+      useProxy: document.getElementById('useProxy'),
+      apiKey: document.getElementById('apiKey'),
+      apiSecret: document.getElementById('apiSecret'),
+      passphrase: document.getElementById('passphrase'),
+      ccy: document.getElementById('ccy'),
+      btnPublicTime: document.getElementById('btnPublicTime'),
+      btnAccount: document.getElementById('btnAccount'),
+      btnClear: document.getElementById('btnClear'),
+      btnMask: document.getElementById('btnMask'),
+      status: document.getElementById('status'),
+      log: document.getElementById('log')
+    };
+
+    const enc = new TextEncoder();
+
+    function mask(value) {
+      if (!value) return '(empty)';
+      if (value.length <= 8) return '*'.repeat(value.length);
+      return value.slice(0, 4) + '*'.repeat(value.length - 8) + value.slice(-4);
+    }
+
+    function pushLog(title, payload) {
+      const stamp = new Date().toISOString();
+      const body = typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2);
+      ui.log.textContent += `[${stamp}] ${title}\n${body}\n\n`;
+      ui.log.scrollTop = ui.log.scrollHeight;
+    }
+
+    function setStatus(message, mode) {
+      ui.status.className = 'status';
+      if (mode === 'ok') ui.status.classList.add('ok');
+      if (mode === 'warn') ui.status.classList.add('warn');
+      if (mode === 'err') ui.status.classList.add('err');
+      ui.status.textContent = message;
+    }
+
+    function normalizeBaseUrl(input) {
+      const raw = (input || '').trim();
+      if (!raw) return 'https://www.okx.com';
+      return raw.replace(/\/+$/, '');
+    }
+
+    function normalizeProxyUrl(input) {
+      const raw = (input || '').trim();
+      if (!raw) return '';
+      return raw;
+    }
+
+    function buildRequestUrl(url) {
+      if (!ui.useProxy.checked) return url;
+      const proxyUrl = normalizeProxyUrl(ui.proxyUrl.value);
+      if (!proxyUrl) return url;
+      return `${proxyUrl}${encodeURIComponent(url)}`;
+    }
+
+    async function fetchJson(url, options = {}) {
+      const requestUrl = buildRequestUrl(url);
+      const res = await fetch(requestUrl, options);
+      const text = await res.text();
+      let data;
+      try {
+        data = text ? JSON.parse(text) : null;
+      } catch {
+        data = text;
+      }
+      return {
+        ok: res.ok,
+        status: res.status,
+        data,
+        requestUrl,
+        headers: Object.fromEntries(res.headers.entries())
+      };
+    }
+
+    function arrayBufferToBase64(buffer) {
+      const bytes = new Uint8Array(buffer);
+      let binary = '';
+      for (let i = 0; i < bytes.byteLength; i += 1) {
+        binary += String.fromCharCode(bytes[i]);
+      }
+      return btoa(binary);
+    }
+
+    async function hmacSha256Base64(secret, payload) {
+      const key = await crypto.subtle.importKey(
+        'raw',
+        enc.encode(secret),
+        { name: 'HMAC', hash: 'SHA-256' },
+        false,
+        ['sign']
+      );
+      const sig = await crypto.subtle.sign('HMAC', key, enc.encode(payload));
+      return arrayBufferToBase64(sig);
+    }
+
+    function buildBalancePath(ccy) {
+      const value = (ccy || '').trim();
+      if (!value) return '/api/v5/account/balance';
+      return `/api/v5/account/balance?ccy=${encodeURIComponent(value)}`;
+    }
+
+    function guessFixHints(code, msg) {
+      const hints = [];
+      if (code === '50113') hints.push('Invalid signature. Kiem tra prehash string: timestamp + method + requestPath + body.');
+      if (code === '50114') hints.push('Invalid authorization header. Kiem tra API key va passphrase.');
+      if (code === '50115') hints.push('Invalid request timestamp. Dong bo gio may tinh.');
+      if (code === '50119') hints.push('API key does not exist. Kiem tra key da dung env va da kich hoat.');
+      if (code === '50120') hints.push('API key invalid passphrase. Kiem tra passphrase.');
+      if (typeof msg === 'string' && msg.toLowerCase().includes('failed to fetch')) {
+        hints.push('Trinh duyet bi CORS khi goi signed endpoint. Hay bat proxy hoac goi qua backend API route.');
+      }
+      return hints;
+    }
+
+    async function testPublicTime() {
+      const baseUrl = normalizeBaseUrl(ui.baseUrl.value);
+      setStatus('Dang goi /api/v5/public/time ...', 'warn');
+      try {
+        const result = await fetchJson(`${baseUrl}/api/v5/public/time`);
+        pushLog('PUBLIC_TIME_RESULT', result);
+        if (!result.ok) {
+          setStatus(`Public time that bai HTTP ${result.status}`, 'err');
+          return;
+        }
+        const serverTime = Number(result.data?.data?.[0]?.ts || 0);
+        const delta = serverTime > 0 ? Date.now() - serverTime : null;
+        setStatus(`Public time OK. Lech local - server: ${delta} ms`, 'ok');
+      } catch (error) {
+        pushLog('PUBLIC_TIME_ERROR', String(error));
+        setStatus(`Public time loi: ${String(error)}`, 'err');
+      }
+    }
+
+    async function testAccountReadOnly() {
+      const apiKey = ui.apiKey.value.trim();
+      const apiSecret = ui.apiSecret.value.trim();
+      const passphrase = ui.passphrase.value.trim();
+      const baseUrl = normalizeBaseUrl(ui.baseUrl.value);
+      const ccy = ui.ccy.value.trim();
+
+      if (!apiKey || !apiSecret || !passphrase) {
+        setStatus('Can nhap day du API key, secret, passphrase.', 'err');
+        return;
+      }
+
+      setStatus('Dang test /api/v5/account/balance ...', 'warn');
+      pushLog('KEY_INFO', {
+        apiKeyMasked: mask(apiKey),
+        secretMasked: mask(apiSecret),
+        passphraseMasked: mask(passphrase),
+        ccy,
+        baseUrl,
+        useProxy: ui.useProxy.checked,
+        proxyUrl: normalizeProxyUrl(ui.proxyUrl.value)
+      });
+
+      try {
+        const timestamp = new Date().toISOString();
+        const method = 'GET';
+        const requestPath = buildBalancePath(ccy);
+        const payload = `${timestamp}${method}${requestPath}`;
+        const signature = await hmacSha256Base64(apiSecret, payload);
+
+        const result = await fetchJson(`${baseUrl}${requestPath}`, {
+          method,
+          headers: {
+            'OK-ACCESS-KEY': apiKey,
+            'OK-ACCESS-SIGN': signature,
+            'OK-ACCESS-TIMESTAMP': timestamp,
+            'OK-ACCESS-PASSPHRASE': passphrase
+          }
+        });
+
+        pushLog('ACCOUNT_RESULT', result);
+
+        if (result.ok && result.data?.code === '0') {
+          const totalEq = result.data?.data?.[0]?.totalEq;
+          setStatus(`Ket noi thanh cong. totalEq=${totalEq ?? 'N/A'}`, 'ok');
+          return;
+        }
+
+        const code = result.data?.code;
+        const msg = result.data?.msg;
+        const hints = guessFixHints(code, msg);
+        setStatus(`That bai HTTP ${result.status}. OKX code=${code ?? 'N/A'}`, 'err');
+        if (hints.length) {
+          pushLog('DEBUG_HINTS', hints);
+        }
+      } catch (error) {
+        const message = String(error);
+        const hints = guessFixHints(null, message);
+        pushLog('ACCOUNT_ERROR', { message, hints });
+        if (hints.length) {
+          setStatus(`Loi khong xac dinh: ${message} | ${hints.join(' ')}`, 'err');
+        } else {
+          setStatus(`Loi khong xac dinh: ${message}`, 'err');
+        }
+      }
+    }
+
+    function setBusy(isBusy) {
+      ui.btnPublicTime.disabled = isBusy;
+      ui.btnAccount.disabled = isBusy;
+    }
+
+    ui.btnPublicTime.addEventListener('click', async () => {
+      setBusy(true);
+      try {
+        await testPublicTime();
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    ui.btnAccount.addEventListener('click', async () => {
+      setBusy(true);
+      try {
+        await testAccountReadOnly();
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    ui.btnClear.addEventListener('click', () => {
+      ui.log.textContent = '';
+      setStatus('Da clear log.', 'warn');
+    });
+
+    ui.btnMask.addEventListener('click', () => {
+      const nextType = ui.apiSecret.type === 'password' ? 'text' : 'password';
+      ui.apiSecret.type = nextType;
+      ui.passphrase.type = nextType;
+    });
+  </script>
+</body>
+</html>

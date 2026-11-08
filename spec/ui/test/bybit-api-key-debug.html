@@ -1,0 +1,419 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bybit API Key Debug</title>
+  <style>
+    :root {
+      --bg1: #0d1324;
+      --bg2: #152c4a;
+      --card: rgba(255, 255, 255, 0.08);
+      --stroke: rgba(255, 255, 255, 0.2);
+      --text: #eef4ff;
+      --muted: #b7c4dc;
+      --ok: #2dd4bf;
+      --warn: #f59e0b;
+      --err: #f97373;
+      --accent: #56e39f;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(1200px 700px at 8% 10%, #1b3d63 0%, transparent 60%),
+        radial-gradient(900px 600px at 85% 25%, #17344f 0%, transparent 56%),
+        linear-gradient(135deg, var(--bg1), var(--bg2));
+      display: grid;
+      place-items: center;
+      padding: 24px;
+    }
+
+    .panel {
+      width: min(960px, 100%);
+      border: 1px solid var(--stroke);
+      border-radius: 16px;
+      background: var(--card);
+      backdrop-filter: blur(8px);
+      padding: 20px;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.35);
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: 24px;
+      letter-spacing: 0.2px;
+    }
+
+    .sub {
+      margin: 0 0 18px;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+    }
+
+    @media (min-width: 860px) {
+      .grid {
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+
+    label {
+      display: block;
+      font-size: 13px;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+
+    input {
+      width: 100%;
+      padding: 12px;
+      border-radius: 10px;
+      border: 1px solid var(--stroke);
+      background: rgba(3, 9, 20, 0.55);
+      color: var(--text);
+      outline: none;
+      transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    }
+
+    input:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(86, 227, 159, 0.2);
+    }
+
+    .actions {
+      margin-top: 16px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    button {
+      border: 1px solid transparent;
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-size: 14px;
+      font-weight: 600;
+      color: #07101d;
+      background: var(--accent);
+      cursor: pointer;
+      transition: transform 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
+    }
+
+    button:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 10px 20px rgba(0, 0, 0, 0.25);
+    }
+
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      transform: none;
+      box-shadow: none;
+    }
+
+    .ghost {
+      color: var(--text);
+      background: transparent;
+      border-color: var(--stroke);
+    }
+
+    .status {
+      margin-top: 14px;
+      border: 1px solid var(--stroke);
+      border-radius: 12px;
+      padding: 12px;
+      background: rgba(4, 12, 22, 0.5);
+      font-size: 14px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .ok { color: var(--ok); }
+    .warn { color: var(--warn); }
+    .err { color: var(--err); }
+
+    .log {
+      margin-top: 12px;
+      max-height: 320px;
+      overflow: auto;
+      border: 1px solid var(--stroke);
+      border-radius: 12px;
+      padding: 12px;
+      background: rgba(4, 12, 22, 0.65);
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 13px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+  <main class="panel">
+    <h1>Bybit API Key Read-Only Debug</h1>
+    <p class="sub">
+      Test Bybit signed endpoint. Trinh duyet local de bi CORS, vi vay uu tien goi backend API route.
+    </p>
+
+    <section class="grid">
+      <div>
+        <label for="backendUrl">Backend URL</label>
+        <input id="backendUrl" value="http://localhost:3000" />
+      </div>
+
+      <div>
+        <label for="proxy">Proxy (optional, format host:port:user:pass hoac http://user:pass@host:port)</label>
+        <input id="proxy" placeholder="snvt10.tunproxy.com:16967:dui14:dui141005" />
+      </div>
+
+      <div>
+        <label for="baseUrl">Bybit Base URL</label>
+        <input id="baseUrl" value="https://api.bybit.com" />
+      </div>
+
+      <div>
+        <label for="recvWindow">recvWindow (ms)</label>
+        <input id="recvWindow" type="number" min="1000" max="60000" value="5000" />
+      </div>
+
+      <div>
+        <label for="accountType">accountType</label>
+        <input id="accountType" value="UNIFIED" />
+      </div>
+
+      <div>
+        <label for="apiKey">BYBIT_API_KEY</label>
+        <input id="apiKey" autocomplete="off" spellcheck="false" />
+      </div>
+
+      <div>
+        <label for="apiSecret">BYBIT_API_SECRET</label>
+        <input id="apiSecret" type="password" autocomplete="off" spellcheck="false" />
+      </div>
+    </section>
+
+    <div class="actions">
+      <button id="btnPublicTime">Test Public Time</button>
+      <button id="btnVerify">Test Signed via Backend API</button>
+      <button id="btnClear" class="ghost">Clear Log</button>
+      <button id="btnMask" class="ghost">Toggle Show Secret</button>
+    </div>
+
+    <div id="status" class="status">San sang debug.</div>
+    <div id="log" class="log"></div>
+  </main>
+
+  <script>
+    const ui = {
+      backendUrl: document.getElementById('backendUrl'),
+      proxy: document.getElementById('proxy'),
+      baseUrl: document.getElementById('baseUrl'),
+      recvWindow: document.getElementById('recvWindow'),
+      accountType: document.getElementById('accountType'),
+      apiKey: document.getElementById('apiKey'),
+      apiSecret: document.getElementById('apiSecret'),
+      btnPublicTime: document.getElementById('btnPublicTime'),
+      btnVerify: document.getElementById('btnVerify'),
+      btnClear: document.getElementById('btnClear'),
+      btnMask: document.getElementById('btnMask'),
+      status: document.getElementById('status'),
+      log: document.getElementById('log')
+    };
+
+    function pushLog(title, payload) {
+      const stamp = new Date().toISOString();
+      const body = typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2);
+      ui.log.textContent += `[${stamp}] ${title}\n${body}\n\n`;
+      ui.log.scrollTop = ui.log.scrollHeight;
+    }
+
+    function setStatus(message, mode) {
+      ui.status.className = 'status';
+      if (mode === 'ok') ui.status.classList.add('ok');
+      if (mode === 'warn') ui.status.classList.add('warn');
+      if (mode === 'err') ui.status.classList.add('err');
+      ui.status.textContent = message;
+    }
+
+    function normalizeBaseUrl(input, fallback) {
+      const raw = (input || '').trim();
+      if (!raw) return fallback;
+      return raw.replace(/\/+$/, '');
+    }
+
+    function getDefaultBackendUrl() {
+      if (location.protocol === 'http:' || location.protocol === 'https:') {
+        return location.origin;
+      }
+      return 'http://localhost:3000';
+    }
+
+    function parseProxyConfig(rawProxy) {
+      const value = (rawProxy || '').trim();
+      if (!value) return null;
+      return { proxy: value };
+    }
+
+    function collectBackendCandidates() {
+      const configured = normalizeBaseUrl(ui.backendUrl.value, getDefaultBackendUrl());
+      const candidates = [configured];
+
+      if (location.protocol === 'http:' || location.protocol === 'https:') {
+        const currentOrigin = normalizeBaseUrl(location.origin, location.origin);
+        if (!candidates.includes(currentOrigin)) candidates.push(currentOrigin);
+      }
+
+      return candidates;
+    }
+
+    async function postVerifyWithFallback(payload) {
+      const backendCandidates = collectBackendCandidates();
+      let lastError = null;
+
+      for (const backendUrl of backendCandidates) {
+        try {
+          const result = await fetchJson(`${backendUrl}/api/exchange/debug/verify`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          return { backendUrl, result };
+        } catch (error) {
+          lastError = error;
+          pushLog('VERIFY_BACKEND_RETRY', { backendUrl, error: String(error) });
+        }
+      }
+
+      throw lastError ?? new Error('Khong the ket noi backend API');
+    }
+
+    async function fetchJson(url, options = {}) {
+      const res = await fetch(url, options);
+      const text = await res.text();
+      let data;
+      try {
+        data = text ? JSON.parse(text) : null;
+      } catch {
+        data = text;
+      }
+      return { ok: res.ok, status: res.status, data };
+    }
+
+    async function testPublicTime() {
+      const baseUrl = normalizeBaseUrl(ui.baseUrl.value, 'https://api.bybit.com');
+      setStatus('Dang goi /v5/market/time ...', 'warn');
+      try {
+        const result = await fetchJson(`${baseUrl}/v5/market/time`);
+        pushLog('PUBLIC_TIME_RESULT', result);
+        if (!result.ok) {
+          setStatus(`Public time that bai HTTP ${result.status}`, 'err');
+          return;
+        }
+        const serverTime = Number(result.data?.result?.timeSecond || 0) * 1000;
+        const delta = serverTime > 0 ? Date.now() - serverTime : null;
+        setStatus(`Public time OK. Lech local - server: ${delta} ms`, 'ok');
+      } catch (error) {
+        pushLog('PUBLIC_TIME_ERROR', String(error));
+        setStatus(`Public time loi: ${String(error)}`, 'err');
+      }
+    }
+
+    async function testSignedViaBackend() {
+      const baseUrl = normalizeBaseUrl(ui.baseUrl.value, 'https://api.bybit.com');
+      const apiKey = ui.apiKey.value.trim();
+      const apiSecret = ui.apiSecret.value.trim();
+      const recvWindow = Number(ui.recvWindow.value || 5000);
+      const accountType = ui.accountType.value.trim() || 'UNIFIED';
+      const proxyConfig = parseProxyConfig(ui.proxy.value);
+
+      if (!apiKey || !apiSecret) {
+        setStatus('Can nhap API key va API secret.', 'err');
+        return;
+      }
+
+      setStatus('Dang goi backend /api/exchange/debug/verify ...', 'warn');
+
+      try {
+        const payload = {
+          exchange: 'bybit',
+          baseUrl,
+          apiKey,
+          apiSecret,
+          recvWindow,
+          accountType,
+          ...(proxyConfig || {})
+        };
+
+        const { backendUrl, result } = await postVerifyWithFallback(payload);
+
+        pushLog('VERIFY_RESULT', result.data);
+        pushLog('VERIFY_BACKEND', backendUrl);
+
+        if (!result.ok || !result.data?.success) {
+          setStatus(`Backend call that bai HTTP ${result.status}`, 'err');
+          return;
+        }
+
+        const verified = Boolean(result.data?.data?.verified);
+        const message = result.data?.data?.exchangeMessage || '';
+        if (verified) {
+          setStatus('Xac thuc thanh cong voi signed endpoint Bybit.', 'ok');
+        } else {
+          setStatus(`Xac thuc that bai. ${message}`, 'err');
+        }
+      } catch (error) {
+        pushLog('VERIFY_ERROR', String(error));
+        setStatus(`Loi khi goi backend API: ${String(error)}`, 'err');
+      }
+    }
+
+    function setBusy(isBusy) {
+      ui.btnPublicTime.disabled = isBusy;
+      ui.btnVerify.disabled = isBusy;
+    }
+
+    ui.btnPublicTime.addEventListener('click', async () => {
+      setBusy(true);
+      try {
+        await testPublicTime();
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    ui.btnVerify.addEventListener('click', async () => {
+      setBusy(true);
+      try {
+        await testSignedViaBackend();
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    ui.btnClear.addEventListener('click', () => {
+      ui.log.textContent = '';
+      setStatus('Da clear log.', 'warn');
+    });
+
+    ui.btnMask.addEventListener('click', () => {
+      ui.apiSecret.type = ui.apiSecret.type === 'password' ? 'text' : 'password';
+    });
+
+    ui.backendUrl.value = getDefaultBackendUrl();
+  </script>
+</body>
+</html>

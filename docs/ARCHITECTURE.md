@@ -2,7 +2,7 @@
 
 ## Overview
 
-Track PNL Pro follows a layered architecture that separates presentation, business logic, domain processing, and infrastructure integrations. This design improves maintainability, scalability, and testability.
+PnLens follows a layered architecture that separates presentation, business logic, domain processing, and infrastructure integrations. This design improves maintainability, scalability, and testability.
 
 ### Architecture
 

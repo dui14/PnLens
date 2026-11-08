@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>aiTrackProfit | Demo Trading Terminal</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@200..800&amp;family=JetBrains+Mono:wght@400;700&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    colors: {
+                        "primary": "#5f4a8c", // Ultra Violet base
+                        "accent-lemon": "#FFFACD", // Lemon Chiffon
+                        "background-light": "#f7f6f7",
+                        "background-dark": "#121016",
+                        "panel-dark": "#1c1a22",
+                    },
+                    fontFamily: {
+                        "display": ["Manrope", "sans-serif"],
+                        "mono": ["JetBrains Mono", "monospace"]
+                    },
+                    borderRadius: {"DEFAULT": "0.25rem", "lg": "0.5rem", "xl": "0.75rem", "full": "9999px"},
+                },
+            },
+        }
+    </script>
+<style>
+        body { font-family: 'Manrope', sans-serif; }
+        .price-font { font-family: 'JetBrains Mono', monospace; }
+        ::-webkit-scrollbar { width: 4px; height: 4px; }
+        ::-webkit-scrollbar-track { background: #18161c; }
+        ::-webkit-scrollbar-thumb { background: #5f4a8c; border-radius: 10px; }
+    </style>
+</head>
+<body class="bg-background-light dark:bg-background-dark text-slate-900 dark:text-slate-100 antialiased overflow-hidden h-screen flex flex-col">
+<!-- Top Navigation Bar -->
+<header class="flex items-center justify-between h-14 border-b border-primary/20 bg-background-light dark:bg-panel-dark px-4 shrink-0">
+<div class="flex items-center gap-6">
+<div class="flex items-center gap-2 text-primary dark:text-accent-lemon">
+<span class="material-symbols-outlined text-3xl">query_stats</span>
+<h1 class="text-lg font-extrabold tracking-tight font-display italic">aiTrackProfit</h1>
+</div>
+<div class="h-6 w-[1px] bg-slate-700"></div>
+<nav class="flex items-center gap-4 text-sm font-medium">
+<a class="text-primary dark:text-slate-100 hover:text-primary transition-colors" href="#">Dashboard</a>
+<a class="text-slate-500 hover:text-primary transition-colors" href="#">Markets</a>
+<a class="px-3 py-1 rounded bg-primary text-white" href="#">Terminal</a>
+<a class="text-slate-500 hover:text-primary transition-colors" href="#">Assets</a>
+</nav>
+</div>
+<div class="flex items-center gap-4">
+<div class="flex items-center bg-background-dark/50 px-3 py-1 rounded-lg border border-primary/20">
+<span class="material-symbols-outlined text-sm text-accent-lemon mr-2">account_balance_wallet</span>
+<span class="price-font text-sm font-bold text-emerald-400">$125,400.00</span>
+</div>
+<div class="flex items-center gap-2">
+<button class="p-2 hover:bg-primary/10 rounded-full transition-colors text-slate-400">
+<span class="material-symbols-outlined">notifications</span>
+</button>
+<button class="p-2 hover:bg-primary/10 rounded-full transition-colors text-slate-400">
+<span class="material-symbols-outlined">settings</span>
+</button>
+<div class="h-8 w-8 rounded-full bg-primary/30 border border-primary/50 flex items-center justify-center">
+<span class="material-symbols-outlined text-sm">person</span>
+</div>
+</div>
+</div>
+</header>
+<!-- Main Terminal Layout -->
+<main class="flex flex-1 overflow-hidden">
+<!-- Left Sidebar: Market Watch -->
+<aside class="w-64 border-r border-primary/10 bg-background-light dark:bg-background-dark flex flex-col shrink-0">
+<div class="p-3 border-b border-primary/10">
+<div class="relative">
+<span class="material-symbols-outlined absolute left-2 top-1.5 text-slate-500 text-lg">search</span>
+<input class="w-full bg-slate-800/50 border-none rounded-lg pl-8 py-1.5 text-xs focus:ring-1 focus:ring-primary" placeholder="Search pairs..." type="text"/>
+</div>
+</div>
+<div class="flex-1 overflow-y-auto">
+<table class="w-full text-left text-xs">
+<thead class="sticky top-0 bg-background-dark text-slate-500 font-bold border-b border-primary/10">
+<tr>
+<th class="p-3 uppercase">Pair</th>
+<th class="p-3 uppercase text-right">Price</th>
+<th class="p-3 uppercase text-right">24h%</th>
+</tr>
+</thead>
+<tbody class="divide-y divide-primary/5">
+<tr class="hover:bg-primary/5 cursor-pointer">
+<td class="p-3 font-bold">BTC/USDT</td>
+<td class="p-3 text-right price-font font-bold text-emerald-400">64,231.50</td>
+<td class="p-3 text-right text-emerald-400 price-font">+1.42%</td>
+</tr>
+<tr class="bg-primary/10 border-l-2 border-primary">
+<td class="p-3 font-bold">ETH/USDT</td>
+<td class="p-3 text-right price-font font-bold text-emerald-400">3,450.12</td>
+<td class="p-3 text-right text-emerald-400 price-font">+2.15%</td>
+</tr>
+<tr class="hover:bg-primary/5 cursor-pointer">
+<td class="p-3 font-bold">SOL/USDT</td>
+<td class="p-3 text-right price-font font-bold text-rose-400">142.88</td>
+<td class="p-3 text-right text-rose-400 price-font">-0.85%</td>
+</tr>
+<tr class="hover:bg-primary/5 cursor-pointer">
+<td class="p-3 font-bold">AVAX/USDT</td>
+<td class="p-3 text-right price-font font-bold">34.12</td>
+<td class="p-3 text-right text-emerald-400 price-font">+0.12%</td>
+</tr>
+</tbody>
+</table>
+</div>
+</aside>
+<!-- Center Area: Chart and Trade History -->
+<section class="flex-1 flex flex-col min-w-0 bg-background-dark">
+<!-- Asset Info Bar -->
+<div class="h-12 border-b border-primary/10 flex items-center px-4 gap-6 shrink-0 bg-panel-dark/50">
+<div class="flex items-center gap-2">
+<span class="font-bold text-lg">ETH / USDT</span>
+<span class="text-xs px-2 py-0.5 rounded bg-accent-lemon text-background-dark font-bold uppercase">Perpetual</span>
+</div>
+<div class="flex flex-col">
+<span class="text-[10px] text-slate-500 uppercase font-bold">Last Price</span>
+<span class="price-font text-emerald-400 font-bold text-sm">3,450.12</span>
+</div>
+<div class="flex flex-col">
+<span class="text-[10px] text-slate-500 uppercase font-bold">24h Change</span>
+<span class="price-font text-emerald-400 font-bold text-sm">+72.15 (+2.15%)</span>
+</div>
+<div class="flex flex-col">
+<span class="text-[10px] text-slate-500 uppercase font-bold">24h High</span>
+<span class="price-font font-bold text-sm">3,510.00</span>
+</div>
+<div class="flex flex-col">
+<span class="text-[10px] text-slate-500 uppercase font-bold">24h Low</span>
+<span class="price-font font-bold text-sm">3,380.45</span>
+</div>
+</div>
+<!-- Chart Area (Placeholder for TradingView) -->
+<div class="flex-1 relative bg-[#0d0b10] overflow-hidden">
+<div class="absolute inset-0 opacity-20 pointer-events-none" style="background-image: linear-gradient(#5f4a8c 1px, transparent 1px), linear-gradient(90deg, #5f4a8c 1px, transparent 1px); background-size: 40px 40px;"></div>
+<div class="absolute inset-0 flex items-center justify-center pointer-events-none">
+<div class="flex flex-col items-center">
+<span class="material-symbols-outlined text-primary/30 text-6xl">show_chart</span>
+<p class="text-slate-600 font-display font-medium">Interactive Chart Engine Loading...</p>
+</div>
+</div>
+<!-- Simulated Price Line -->
+<svg class="absolute inset-0 w-full h-full p-4 pointer-events-none" preserveaspectratio="none">
+<path class="opacity-50" d="M0 400 L50 380 L100 390 L150 350 L200 360 L250 320 L300 330 L350 310 L400 320 L450 280 L500 290 L550 250 L600 260 L650 220 L700 230 L750 200 L800 210 L850 180 L900 190 L950 150 L1000 160" fill="none" stroke="#5f4a8c" stroke-width="2"></path>
+</svg>
+</div>
+<!-- Bottom Panel: Positions & Orders -->
+<div class="h-48 border-t border-primary/10 flex flex-col shrink-0 bg-panel-dark">
+<div class="flex border-b border-primary/10">
+<button class="px-4 py-2 text-xs font-bold border-b-2 border-primary text-primary">Open Positions (1)</button>
+<button class="px-4 py-2 text-xs font-bold text-slate-500 hover:text-slate-300">Open Orders (0)</button>
+<button class="px-4 py-2 text-xs font-bold text-slate-500 hover:text-slate-300">Order History</button>
+<button class="px-4 py-2 text-xs font-bold text-slate-500 hover:text-slate-300">Trade History</button>
+</div>
+<div class="flex-1 overflow-auto">
+<table class="w-full text-left text-[11px]">
+<thead class="text-slate-500 border-b border-primary/5">
+<tr>
+<th class="p-2">Symbol</th>
+<th class="p-2">Size</th>
+<th class="p-2">Entry Price</th>
+<th class="p-2">Mark Price</th>
+<th class="p-2">Liq. Price</th>
+<th class="p-2">Margin</th>
+<th class="p-2">PNL (ROE%)</th>
+<th class="p-2 text-right">Close</th>
+</tr>
+</thead>
+<tbody>
+<tr class="border-b border-primary/5">
+<td class="p-2 font-bold text-emerald-400">ETH/USDT Long 10x</td>
+<td class="p-2 price-font">2.50 ETH</td>
+<td class="p-2 price-font">3,420.00</td>
+<td class="p-2 price-font">3,450.12</td>
+<td class="p-2 price-font text-rose-500">3,100.50</td>
+<td class="p-2 price-font">855.00 USDT</td>
+<td class="p-2 price-font text-emerald-400 font-bold">+75.30 (8.80%)</td>
+<td class="p-2 text-right">
+<button class="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-[10px]">Market</button>
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+</section>
+<!-- Right Sidebar: Order Panel -->
+<aside class="w-72 border-l border-primary/10 bg-background-light dark:bg-background-dark flex flex-col shrink-0">
+<div class="flex p-2 gap-2 border-b border-primary/10 bg-panel-dark/30">
+<button class="flex-1 py-2 text-xs font-bold rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">BUY</button>
+<button class="flex-1 py-2 text-xs font-bold rounded bg-slate-800 text-slate-400">SELL</button>
+</div>
+<div class="p-4 flex flex-col gap-4">
+<div class="flex justify-between items-center">
+<span class="text-xs text-slate-500 font-bold">Order Type</span>
+<select class="bg-panel-dark border-primary/20 rounded text-xs py-1 focus:ring-primary">
+<option>Limit</option>
+<option>Market</option>
+<option>Stop Limit</option>
+</select>
+</div>
+<div class="space-y-2">
+<label class="text-[10px] uppercase text-slate-500 font-bold">Price</label>
+<div class="relative">
+<input class="w-full bg-panel-dark border-primary/20 rounded-lg text-sm price-font font-bold text-right pr-12 focus:ring-primary" type="text" value="3,450.12"/>
+<span class="absolute right-3 top-2 text-[10px] text-slate-500 font-bold">USDT</span>
+</div>
+</div>
+<div class="space-y-2">
+<label class="text-[10px] uppercase text-slate-500 font-bold">Size</label>
+<div class="relative">
+<input class="w-full bg-panel-dark border-primary/20 rounded-lg text-sm price-font font-bold text-right pr-12 focus:ring-primary" type="text" value="0.50"/>
+<span class="absolute right-3 top-2 text-[10px] text-slate-500 font-bold">ETH</span>
+</div>
+</div>
+<!-- Percentage Selector -->
+<div class="flex justify-between gap-1">
+<button class="flex-1 py-1 text-[10px] font-bold bg-primary/20 hover:bg-primary/40 rounded transition-colors">25%</button>
+<button class="flex-1 py-1 text-[10px] font-bold bg-primary/20 hover:bg-primary/40 rounded transition-colors">50%</button>
+<button class="flex-1 py-1 text-[10px] font-bold bg-primary/20 hover:bg-primary/40 rounded transition-colors">75%</button>
+<button class="flex-1 py-1 text-[10px] font-bold bg-primary/20 hover:bg-primary/40 rounded transition-colors">100%</button>
+</div>
+<div class="border-t border-primary/10 pt-4 mt-2 space-y-2">
+<div class="flex justify-between text-[11px]">
+<span class="text-slate-500">Cost</span>
+<span class="price-font font-bold">172.51 USDT</span>
+</div>
+<div class="flex justify-between text-[11px]">
+<span class="text-slate-500">Max Buy</span>
+<span class="price-font font-bold text-emerald-400">28.45 ETH</span>
+</div>
+</div>
+<button class="w-full py-3 mt-4 bg-emerald-500 hover:bg-emerald-600 text-white font-bold rounded-xl shadow-lg shadow-emerald-500/20 transition-all uppercase tracking-widest text-sm">
+                    Open Long
+                </button>
+<div class="mt-4 p-3 rounded-lg bg-primary/10 border border-primary/20">
+<div class="flex items-center gap-2 mb-2">
+<span class="material-symbols-outlined text-sm text-accent-lemon">auto_awesome</span>
+<span class="text-[10px] font-bold text-accent-lemon uppercase">AI Signal Strength</span>
+</div>
+<div class="w-full h-1.5 bg-background-dark rounded-full overflow-hidden">
+<div class="h-full bg-emerald-400" style="width: 82%"></div>
+</div>
+<p class="text-[10px] mt-2 text-slate-400 leading-tight">Strong bullish momentum detected. Resistance at 3,520 expected to break in next 4H candle.</p>
+</div>
+</div>
+<!-- Order Book Mini -->
+<div class="flex-1 flex flex-col min-h-0 border-t border-primary/10">
+<div class="p-2 text-[10px] font-bold uppercase text-slate-500 flex justify-between">
+<span>Order Book</span>
+<div class="flex gap-2">
+<span class="text-rose-400">Sell</span>
+<span class="text-emerald-400">Buy</span>
+</div>
+</div>
+<div class="flex-1 overflow-hidden grid grid-rows-2">
+<!-- Asks -->
+<div class="overflow-hidden flex flex-col-reverse">
+<div class="flex justify-between px-3 text-[10px] price-font py-0.5 hover:bg-rose-500/10 transition-colors">
+<span class="text-rose-400">3,455.00</span>
+<span class="text-slate-300">12.451</span>
+</div>
+<div class="flex justify-between px-3 text-[10px] price-font py-0.5 hover:bg-rose-500/10 transition-colors">
+<span class="text-rose-400">3,454.20</span>
+<span class="text-slate-300">0.812</span>
+</div>
+<div class="flex justify-between px-3 text-[10px] price-font py-0.5 hover:bg-rose-500/10 transition-colors">
+<span class="text-rose-400">3,452.85</span>
+<span class="text-slate-300">4.500</span>
+</div>
+</div>
+<!-- Bids -->
+<div class="overflow-hidden">
+<div class="flex justify-between px-3 text-[10px] price-font py-0.5 hover:bg-emerald-500/10 transition-colors">
+<span class="text-emerald-400">3,450.12</span>
+<span class="text-slate-300">22.100</span>
+</div>
+<div class="flex justify-between px-3 text-[10px] price-font py-0.5 hover:bg-emerald-500/10 transition-colors">
+<span class="text-emerald-400">3,449.50</span>
+<span class="text-slate-300">1.250</span>
+</div>
+<div class="flex justify-between px-3 text-[10px] price-font py-0.5 hover:bg-emerald-500/10 transition-colors">
+<span class="text-emerald-400">3,448.20</span>
+<span class="text-slate-300">5.789</span>
+</div>
+</div>
+</div>
+</div>
+</aside>
+</main>
+<!-- Footer Stats -->
+<footer class="h-6 bg-primary dark:bg-panel-dark border-t border-primary/20 flex items-center justify-between px-4 text-[10px] font-bold text-slate-400 shrink-0">
+<div class="flex items-center gap-4">
+<div class="flex items-center gap-1">
+<span class="w-2 h-2 rounded-full bg-emerald-500"></span>
+<span>Connected</span>
+</div>
+<span>Delay: 12ms</span>
+</div>
+<div class="flex items-center gap-4">
+<span class="text-accent-lemon">Demo Mode Active</span>
+<span class="price-font">2023-10-27 14:23:11 UTC</span>
+</div>
+</footer>
+</body></html>

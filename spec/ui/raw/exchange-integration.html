@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="vi"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@200;300;400;500;600;700;800&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    colors: {
+                        "primary": "#5f4a8c",
+                        "accent": "#fefacd",
+                        "background-light": "#f7f6f7",
+                        "background-dark": "#18161c",
+                    },
+                    fontFamily: {
+                        "display": ["Manrope", "sans-serif"]
+                    },
+                    borderRadius: {
+                        "DEFAULT": "0.25rem",
+                        "lg": "0.5rem",
+                        "xl": "0.75rem",
+                        "full": "9999px"
+                    },
+                },
+            },
+        }
+    </script>
+<style>
+        body {
+            font-family: 'Manrope', sans-serif;
+        }
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+    </style>
+</head>
+<body class="bg-background-light dark:bg-background-dark text-slate-900 dark:text-slate-100 min-h-screen">
+<div class="relative flex h-auto min-h-screen w-full flex-col bg-background-light dark:bg-background-dark overflow-x-hidden">
+<div class="layout-container flex h-full grow flex-col">
+<header class="flex items-center justify-between whitespace-nowrap border-b border-solid border-slate-200 dark:border-primary/20 px-6 py-4 lg:px-40">
+<div class="flex items-center gap-3 text-primary">
+<div class="size-8 bg-primary rounded-lg flex items-center justify-center text-accent">
+<span class="material-symbols-outlined">account_balance_wallet</span>
+</div>
+<h2 class="text-slate-900 dark:text-slate-100 text-xl font-extrabold leading-tight tracking-tight">aiTrackProfit</h2>
+</div>
+<div class="flex flex-1 justify-end gap-4 items-center">
+<div class="hidden md:flex gap-6 mr-8">
+<a class="text-sm font-semibold text-slate-600 dark:text-slate-400 hover:text-primary transition-colors" href="#">Dashboard</a>
+<a class="text-sm font-semibold text-primary" href="#">Exchanges</a>
+<a class="text-sm font-semibold text-slate-600 dark:text-slate-400 hover:text-primary transition-colors" href="#">Portfolio</a>
+<a class="text-sm font-semibold text-slate-600 dark:text-slate-400 hover:text-primary transition-colors" href="#">Market</a>
+</div>
+<div class="flex gap-2">
+<button class="flex items-center justify-center rounded-lg h-10 w-10 bg-slate-200 dark:bg-primary/20 text-slate-700 dark:text-slate-200 hover:bg-primary/30 transition-all">
+<span class="material-symbols-outlined text-[20px]">notifications</span>
+</button>
+<button class="flex items-center justify-center rounded-lg h-10 w-10 bg-slate-200 dark:bg-primary/20 text-slate-700 dark:text-slate-200 hover:bg-primary/30 transition-all">
+<span class="material-symbols-outlined text-[20px]">settings</span>
+</button>
+</div>
+<div class="bg-center bg-no-repeat aspect-square bg-cover rounded-full size-10 border-2 border-primary/30" data-alt="User profile avatar close up" style='background-image: url("https://lh3.googleusercontent.com/aida-public/AB6AXuDKdMiSCT_LIC7MKh8GB2Sm3H9XvzRHo8Ogm5Y_weR3-YbXheCAjv5yIJ1lFZ9jYsnu_kjv-JCbSS6sk7yFL7WKrKXBu-lgNuoUG70p2gEOH4aAmU_Wy_j3TONwl9n0eOg6HAzhdlmj3DvcxCvctE-jjPABfX8JrbmjTuJiniJF0pkJnLyvTUX77Utk6qwVuoIDuvN5alWBoMZ7jJZPhy-errYGe0pM9TgJXpQwvRQSyZnUrEY7QkCiyTWUfQSNdcyl0RDh3CioxcWd");'></div>
+</div>
+</header>
+<main class="px-6 lg:px-40 py-8 flex flex-col gap-8">
+<div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-6">
+<div class="flex flex-col gap-2">
+<h1 class="text-slate-900 dark:text-slate-100 text-4xl font-black leading-tight tracking-tight">Exchange Management</h1>
+<p class="text-slate-500 dark:text-slate-400 text-base max-w-xl">Manage your connected exchange accounts and sync settings across your entire portfolio.</p>
+</div>
+<button class="flex items-center justify-center gap-2 rounded-xl h-12 px-6 bg-primary text-accent font-bold text-sm shadow-lg shadow-primary/20 hover:scale-[1.02] active:scale-[0.98] transition-all">
+<span class="material-symbols-outlined">add</span>
+<span>Connect New Exchange</span>
+</button>
+</div>
+<div class="flex flex-col md:flex-row items-center gap-4 rounded-xl border border-primary/20 bg-primary/5 p-5">
+<div class="flex items-center justify-center size-10 rounded-full bg-primary/10 text-primary">
+<span class="material-symbols-outlined">info</span>
+</div>
+<div class="flex flex-col gap-0.5">
+<p class="text-slate-900 dark:text-slate-100 text-sm font-bold leading-tight">Sync Notice</p>
+<p class="text-slate-600 dark:text-slate-400 text-sm font-normal">Toggling off an exchange will exclude its data from your global dashboard analytics and PnL calculations.</p>
+</div>
+</div>
+<div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+<div class="flex flex-col gap-4 rounded-2xl border border-slate-200 dark:border-primary/20 bg-white dark:bg-[#201f23] p-6 shadow-sm hover:shadow-md transition-shadow">
+<div class="flex justify-between items-start">
+<div class="flex items-center gap-4">
+<div class="size-12 rounded-xl bg-[#F3BA2F]/10 flex items-center justify-center p-2 overflow-hidden">
+<img alt="Binance" class="w-full h-full object-contain" data-alt="Binance exchange platform logo" src="https://lh3.googleusercontent.com/aida-public/AB6AXuDqGlT_KkH0R1nMXhqS5zMiQB_iUdNIU6654S3NeEJ9juqBd_gzraBayFjuYLsaYgQ-0mj-TVuoQI5jemf2LrRMDR8G65ZzcFU8QiXWK2EjZkOGbJz3uAUx0XTkGkeLh6-Uwloyz1-90eoIrxx0ZhKfs7NylUNQUdv24maIFWxrFcyo8gF_Sz7y5Y6p6-PHnugR9giNVlepA3A7H7AK5IafPiUB-Oa4N1JirxMF_p36vg0YTg8v_G0skkxZrLW4TxFEc0QEzWy7gu3y"/>
+</div>
+<div class="flex flex-col">
+<h3 class="text-slate-900 dark:text-slate-100 font-bold text-lg">Binance</h3>
+<div class="flex items-center gap-1.5 text-emerald-500 text-xs font-semibold">
+<span class="size-2 rounded-full bg-emerald-500"></span>
+                                        Connected
+                                    </div>
+</div>
+</div>
+<label class="relative inline-flex items-center cursor-pointer group">
+<input checked="" class="sr-only peer" type="checkbox"/>
+<div class="w-11 h-6 bg-slate-300 dark:bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary"></div>
+<span class="ml-3 text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider group-hover:text-primary transition-colors">Active</span>
+</label>
+</div>
+<div class="py-4 border-y border-slate-100 dark:border-primary/10 flex flex-col gap-1">
+<p class="text-slate-500 dark:text-slate-400 text-xs font-medium uppercase tracking-widest">Current Balance</p>
+<div class="flex items-baseline gap-2">
+<p class="text-slate-900 dark:text-slate-100 text-3xl font-black">$12,450.00</p>
+<span class="text-emerald-500 text-sm font-bold">+2.4%</span>
+</div>
+<p class="text-slate-400 dark:text-slate-500 text-xs mt-1">Last synced: 5m ago</p>
+</div>
+<div class="flex gap-2 pt-2">
+<button class="flex-1 flex items-center justify-center gap-2 rounded-lg bg-primary/10 dark:bg-primary/20 text-primary dark:text-slate-100 h-10 text-sm font-bold hover:bg-primary hover:text-accent transition-all">
+<span class="material-symbols-outlined text-[18px]">sync</span>
+                                Sync Now
+                            </button>
+<button class="w-10 h-10 flex items-center justify-center rounded-lg border border-slate-200 dark:border-primary/20 text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-primary/10 transition-all">
+<span class="material-symbols-outlined text-[20px]">edit</span>
+</button>
+<button class="w-10 h-10 flex items-center justify-center rounded-lg border border-slate-200 dark:border-red-500/20 text-slate-500 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 transition-all">
+<span class="material-symbols-outlined text-[20px]">delete</span>
+</button>
+</div>
+</div>
+<div class="flex flex-col gap-4 rounded-2xl border border-slate-200 dark:border-primary/20 bg-white dark:bg-[#201f23] p-6 shadow-sm hover:shadow-md transition-shadow">
+<div class="flex justify-between items-start">
+<div class="flex items-center gap-4">
+<div class="size-12 rounded-xl bg-slate-900 flex items-center justify-center p-2 overflow-hidden">
+<img alt="OKX" class="w-full h-full object-contain" data-alt="OKX exchange platform logo icon" src="https://lh3.googleusercontent.com/aida-public/AB6AXuC2FiZSV6DKUr1adLCBeMVnez4HZJLSuZhIeJGr3JHiqKczAKwetEdlRL-nteCcmW0e5lTW0a0VYuSoHkTShuHe_3bzkcHyS6sXgiaXFgkPulAGYWCQMwO3L6_Ur4fPIB9Jy4XSMJB2m3xgsp37pZD-pjW5EQ3hF8H9yzxhfKb7nnO6F5Cf4yzc2MIOzoPlFK3FDdg3ryp0cIPGVkNcczoV7bJDTt7bdFKE52gF3Y0F9xeYPxHHYQuexosXzKEyyou42vJ9avq0T19Y"/>
+</div>
+<div class="flex flex-col">
+<h3 class="text-slate-900 dark:text-slate-100 font-bold text-lg">OKX</h3>
+<div class="flex items-center gap-1.5 text-red-500 text-xs font-semibold">
+<span class="size-2 rounded-full bg-red-500"></span>
+                                        Connection Error
+                                    </div>
+</div>
+</div>
+<label class="relative inline-flex items-center cursor-pointer group">
+<input class="sr-only peer" type="checkbox"/>
+<div class="w-11 h-6 bg-slate-300 dark:bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary"></div>
+<span class="ml-3 text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider group-hover:text-primary transition-colors">Inactive</span>
+</label>
+</div>
+<div class="py-4 border-y border-slate-100 dark:border-primary/10 flex flex-col gap-1">
+<p class="text-slate-500 dark:text-slate-400 text-xs font-medium uppercase tracking-widest">Current Balance</p>
+<div class="flex items-baseline gap-2">
+<p class="text-slate-900 dark:text-slate-100 text-3xl font-black">$8,210.45</p>
+<span class="text-slate-400 text-sm font-bold">--</span>
+</div>
+<p class="text-red-400 dark:text-red-400/80 text-xs mt-1">Last synced: 2h ago (Auth failure)</p>
+</div>
+<div class="flex gap-2 pt-2">
+<button class="flex-1 flex items-center justify-center gap-2 rounded-lg bg-primary/10 dark:bg-primary/20 text-primary dark:text-slate-100 h-10 text-sm font-bold hover:bg-primary hover:text-accent transition-all">
+<span class="material-symbols-outlined text-[18px]">refresh</span>
+                                Reconnect
+                            </button>
+<button class="w-10 h-10 flex items-center justify-center rounded-lg border border-slate-200 dark:border-primary/20 text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-primary/10 transition-all">
+<span class="material-symbols-outlined text-[20px]">edit</span>
+</button>
+<button class="w-10 h-10 flex items-center justify-center rounded-lg border border-slate-200 dark:border-red-500/20 text-slate-500 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 transition-all">
+<span class="material-symbols-outlined text-[20px]">delete</span>
+</button>
+</div>
+</div>
+<div class="flex flex-col gap-4 rounded-2xl border border-slate-200 dark:border-primary/20 bg-white dark:bg-[#201f23] p-6 shadow-sm hover:shadow-md transition-shadow">
+<div class="flex justify-between items-start">
+<div class="flex items-center gap-4">
+<div class="size-12 rounded-xl bg-primary/10 flex items-center justify-center p-2 overflow-hidden">
+<img alt="Bybit" class="w-full h-full object-contain" data-alt="Bybit exchange platform logo brand" src="https://lh3.googleusercontent.com/aida-public/AB6AXuBJRCBhvQM6BDD1kjSMLsJbRzb9clXHSnKiw6_Bwg2UzujiW0GNFLxurfC6_9GS0reaK007MWN_KFDpvKCOZI2MWUft0B1_cPgK7OZ66h-J4rgE2BW_XxOt_RZGiR8cAH9b_kJCNnsV_U2lT24el1dPQrU6X8jVaIaqmWlA_57CJ0W6RZjKo4WtsJE54v2Co8CfGd8m1HtWYBEWOS7jUMoflwyD991vPLu6qcjFShIpGT0lTNPh3rX9lAMAGDQ_C6XK5kAbIj7bAQG6"/>
+</div>
+<div class="flex flex-col">
+<h3 class="text-slate-900 dark:text-slate-100 font-bold text-lg">Bybit</h3>
+<div class="flex items-center gap-1.5 text-emerald-500 text-xs font-semibold">
+<span class="size-2 rounded-full bg-emerald-500"></span>
+                                        Connected
+                                    </div>
+</div>
+</div>
+<label class="relative inline-flex items-center cursor-pointer group">
+<input checked="" class="sr-only peer" type="checkbox"/>
+<div class="w-11 h-6 bg-slate-300 dark:bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary"></div>
+<span class="ml-3 text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider group-hover:text-primary transition-colors">Active</span>
+</label>
+</div>
+<div class="py-4 border-y border-slate-100 dark:border-primary/10 flex flex-col gap-1">
+<p class="text-slate-500 dark:text-slate-400 text-xs font-medium uppercase tracking-widest">Current Balance</p>
+<div class="flex items-baseline gap-2">
+<p class="text-slate-900 dark:text-slate-100 text-3xl font-black">$4,560.12</p>
+<span class="text-red-500 text-sm font-bold">-0.8%</span>
+</div>
+<p class="text-slate-400 dark:text-slate-500 text-xs mt-1">Last synced: 15m ago</p>
+</div>
+<div class="flex gap-2 pt-2">
+<button class="flex-1 flex items-center justify-center gap-2 rounded-lg bg-primary/10 dark:bg-primary/20 text-primary dark:text-slate-100 h-10 text-sm font-bold hover:bg-primary hover:text-accent transition-all">
+<span class="material-symbols-outlined text-[18px]">sync</span>
+                                Sync Now
+                            </button>
+<button class="w-10 h-10 flex items-center justify-center rounded-lg border border-slate-200 dark:border-primary/20 text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-primary/10 transition-all">
+<span class="material-symbols-outlined text-[20px]">edit</span>
+</button>
+<button class="w-10 h-10 flex items-center justify-center rounded-lg border border-slate-200 dark:border-red-500/20 text-slate-500 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-500/10 transition-all">
+<span class="material-symbols-outlined text-[20px]">delete</span>
+</button>
+</div>
+</div>
+</div>
+<div class="mt-8 rounded-2xl bg-gradient-to-br from-primary to-[#433362] p-8 text-accent relative overflow-hidden group">
+<div class="absolute -right-12 -top-12 size-48 bg-accent/10 rounded-full blur-3xl"></div>
+<div class="relative z-10 flex flex-col md:flex-row justify-between items-center gap-6">
+<div class="flex flex-col gap-2 text-center md:text-left">
+<h2 class="text-2xl font-black">Secure API Connection</h2>
+<p class="text-slate-100/80 max-w-md">We use industry-standard encryption to protect your API keys. Your funds remain safe on the exchange; we only track read-only data.</p>
+</div>
+<button class="px-8 py-3 bg-accent text-primary font-extrabold rounded-xl hover:shadow-xl transition-all hover:-translate-y-1">
+                            Learn more about security
+                        </button>
+</div>
+</div>
+</main>
+<footer class="mt-auto px-6 lg:px-40 py-8 border-t border-slate-200 dark:border-primary/20 flex flex-col md:flex-row justify-between items-center gap-4 text-slate-500 dark:text-slate-400 text-sm">
+<p>© 2024 aiTrackProfit. All rights reserved.</p>
+<div class="flex gap-6">
+<a class="hover:text-primary transition-colors" href="#">Terms of Service</a>
+<a class="hover:text-primary transition-colors" href="#">Privacy Policy</a>
+<a class="hover:text-primary transition-colors" href="#">API Docs</a>
+</div>
+</footer>
+</div>
+</div>
+</body></html>
