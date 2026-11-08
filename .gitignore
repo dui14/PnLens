@@ -11,6 +11,7 @@ src/tsconfig.tsbuildinfo
 keydata.env
 src/.env
 src/.env.*
+supabase/
 
 # Local tooling
 .vscode/
