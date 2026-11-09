@@ -32,6 +32,9 @@ Rows other than debug route lockdown were not executed in this session. Run curl
 | OKX symbol normalization | `spec/features/okx-symbol.md` | todo | `rg -n "split\('-'\)\.slice\(0, 2\)\.join\(''\)" src/lib/adapters/okxAdapter.ts` |
 | Trade symbol query length | `spec/features/trades-symbol-max.md` | todo | `rg -n "symbol: z\.string\(\)\.max\(20\)\.optional\(\)" src/lib/validators/pnl.ts` |
 | PNL summary error status | `spec/features/pnl-summary-status.md` | todo | `rg -n "NOT_FOUND: 404" src/app/api/pnl/summary/route.ts` |
-| Debug route lockdown | `spec/features/debug-route-lockdown.md` | done | `node --test tests/exchange-debug-access.test.ts` |
+| Debug route lockdown | `spec/features/debug-route-lockdown.md` | done | `node --test tests/exchange-debug-access.test.ts tests/middleware-access.test.ts` |
+| Test foundation | `spec/implementation-gap.md` | done | `pnpm test` |
 
-Debug route lockdown, 2026-11-09, repo root unless noted. `rg` commands in `spec/features/debug-route-lockdown.md` exit 0. `node --test tests/exchange-debug-access.test.ts` exit 0 (3 passed). `src`: `pnpm exec tsc --noEmit` exit 0. `src`: `pnpm lint` exit 0.
+Debug route lockdown and P0.1, 2026-11-09, repo root unless noted. Acceptance commands in `spec/features/debug-route-lockdown.md` exit 0. `node --test tests/exchange-debug-access.test.ts tests/middleware-access.test.ts` exit 0 (8 passed).
+
+Test foundation, 2026-11-09, from `src/`, Node v24.1.0. `pnpm test` exit 0 (55 passed). `pnpm test:node` exit 0 (8 passed). `pnpm exec tsc --noEmit` exit 0. `pnpm lint` exit 0. `pnpm build` exit 0. GitHub Actions was not run.

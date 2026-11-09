@@ -32,9 +32,62 @@ export function isExchangeDebugPath(pathname: string): boolean {
 }
 
 export function isExchangeDebugVerifyEnabled(env: DebugAccessEnv): boolean {
+  if (env.NODE_ENV === 'production') return false
   if (env.EXCHANGE_DEBUG_VERIFY_ENABLED === 'true') return true
   if (env.EXCHANGE_DEBUG_VERIFY_ENABLED === 'false') return false
-  return env.NODE_ENV !== 'production'
+  return true
+}
+
+const SIGNED_QUERY_KEYS = new Set(['signature', 'sign'])
+
+export function publicDebugRequestPath(requestPath: string): string {
+  const question = requestPath.indexOf('?')
+  if (question < 0) return requestPath
+
+  const pathname = requestPath.slice(0, question)
+  const params = new URLSearchParams(requestPath.slice(question + 1))
+  for (const key of params.keys()) {
+    if (SIGNED_QUERY_KEYS.has(key.toLowerCase())) return pathname
+  }
+
+  return requestPath
+}
+
+export function redactDebugText(value: string | null): string | null {
+  if (value === null) return null
+  return value
+    .replace(/signature=[^&\s]+/gi, 'signature=redacted')
+    .replace(/(^|&)sign=[^&\s]+/gi, '$1sign=redacted')
+}
+
+export type PublicDebugVerifyData = {
+  exchange: string
+  verified: boolean
+  upstreamStatus: number
+  exchangeCode: string | number | null
+  exchangeMessage: string | null
+  requestPath: string
+  hints: string[]
+}
+
+export function buildPublicDebugVerifyData(input: {
+  exchange: string
+  verified: boolean
+  upstreamStatus: number
+  exchangeCode: string | number | null
+  exchangeMessage: string | null
+  requestPath: string
+  hints: string[]
+}): PublicDebugVerifyData {
+  return {
+    exchange: input.exchange,
+    verified: input.verified,
+    upstreamStatus: input.upstreamStatus,
+    exchangeCode: input.exchangeCode,
+    exchangeMessage: redactDebugText(input.exchangeMessage),
+    requestPath: publicDebugRequestPath(input.requestPath),
+    hints: input.hints,
+  }
 }
 
 export function resolveDebugBaseUrl(

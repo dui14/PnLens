@@ -1,5 +1,6 @@
 import { createServerClient, type CookieOptions } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
+import { decideMiddlewareAccess } from '@/lib/security/middlewareAccess'
 import {
   isExchangeDebugPath,
   isExchangeDebugVerifyEnabled,
@@ -28,12 +29,6 @@ const PROTECTED_ROUTES = [
 
 const AUTH_ROUTES = ['/login', '/register']
 
-function hasSupabaseAuthCookie(request: NextRequest): boolean {
-  return request.cookies
-    .getAll()
-    .some(({ name }) => name.startsWith('sb-') && name.includes('-auth-token'))
-}
-
 async function getUserWithRetry(
   fetchUser: () => Promise<MiddlewareAuthResponse>,
   retries: number
@@ -57,8 +52,6 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   const { pathname } = request.nextUrl
   const isProtected = PROTECTED_ROUTES.some((route) => pathname.startsWith(route))
   const isAuthRoute = AUTH_ROUTES.some((route) => pathname.startsWith(route))
-  const hasAuthCookie = hasSupabaseAuthCookie(request)
-
   const isApiRoute = pathname.startsWith('/api/')
   if (isApiRoute && request.method !== 'GET' && request.method !== 'HEAD') {
     const contentLength = request.headers.get('content-length')
@@ -107,36 +100,40 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     )
 
     user = await getUserWithRetry(() => supabase.auth.getUser(), 1)
-  } catch (error) {
+  } catch {
     authUnavailable = true
-    console.error('[middleware] auth check failed', error)
+    console.error('[middleware] auth check failed')
   }
 
-  if (isProtected && !user && authUnavailable && hasAuthCookie) {
-    return response
-  }
+  const decision = decideMiddlewareAccess({
+    isProtected,
+    isAuthRoute,
+    isApiRoute,
+    userPresent: user !== null,
+    authUnavailable,
+  })
 
-  if (isProtected && !user && authUnavailable && isApiRoute) {
+  if (decision === 'auth_unavailable') {
     return NextResponse.json(
       { success: false, data: null, error: 'AUTH_SERVICE_UNAVAILABLE' },
       { status: 503 }
     )
   }
 
-  if (isProtected && !user && isApiRoute) {
+  if (decision === 'unauthorized') {
     return NextResponse.json(
       { success: false, data: null, error: 'UNAUTHORIZED' },
       { status: 401 }
     )
   }
 
-  if (isProtected && !user && !isApiRoute) {
+  if (decision === 'redirect_login') {
     const loginUrl = new URL('/login', request.url)
     loginUrl.searchParams.set('next', pathname)
     return NextResponse.redirect(loginUrl)
   }
 
-  if (isAuthRoute && user) {
+  if (decision === 'redirect_dashboard') {
     return NextResponse.redirect(new URL('/dashboard', request.url))
   }
 

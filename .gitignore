@@ -26,15 +26,6 @@ diagram/
 AGENTS.md
 .github/copilot-instructions.md
 spec/ 
-# Tests under src
-src/**/__tests__/
-src/**/test/
-src/**/tests/
-src/**/*.test.ts
-src/**/*.test.tsx
-src/**/*.spec.ts
-src/**/*.spec.tsx
-
 # Markdown, keep the two published docs
 **/*.md
 !README.md

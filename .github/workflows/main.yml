@@ -2,18 +2,24 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, next]
+  pull_request:
+    branches: [main, next]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build:
+  verify:
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: src
-        
+
     env:
-      NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
-      NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+      NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:54321
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-public-anon-key
 
     steps:
       - uses: actions/checkout@v4
@@ -24,9 +30,13 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: pnpm
           cache-dependency-path: src/pnpm-lock.yaml
 
       - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - run: pnpm test:node
+      - run: pnpm lint
+      - run: pnpm exec tsc --noEmit
       - run: pnpm build

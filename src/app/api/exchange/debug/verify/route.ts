@@ -3,7 +3,10 @@ import { NextRequest, NextResponse } from 'next/server'
 import { signOkxRequest } from '@/lib/adapters/okxApi'
 import { createSupabaseServerClient } from '@/lib/db/supabase-server'
 import {
+  buildPublicDebugVerifyData,
   isExchangeDebugVerifyEnabled,
+  publicDebugRequestPath,
+  redactDebugText,
   resolveDebugBaseUrl,
 } from '@/lib/security/exchangeDebugAccess'
 import {
@@ -17,7 +20,6 @@ type DebugVerifyResult = {
   exchangeCode: string | number | null
   exchangeMessage: string | null
   requestPath: string
-  payload: unknown
 }
 
 function signBinance(query: string, secret: string): string {
@@ -117,9 +119,8 @@ async function verifyBinance(input: ExchangeDebugVerifyInput): Promise<DebugVeri
     ok: ok && exchangeCode === null,
     upstreamStatus: status,
     exchangeCode: typeof exchangeCode === 'number' ? exchangeCode : null,
-    exchangeMessage,
-    requestPath,
-    payload: body,
+    exchangeMessage: redactDebugText(exchangeMessage),
+    requestPath: publicDebugRequestPath(requestPath),
   }
 }
 
@@ -155,8 +156,7 @@ async function verifyOkx(input: ExchangeDebugVerifyInput): Promise<DebugVerifyRe
     upstreamStatus: status,
     exchangeCode: typeof exchangeCode === 'string' ? exchangeCode : null,
     exchangeMessage,
-    requestPath,
-    payload: body,
+    requestPath: publicDebugRequestPath(requestPath),
   }
 }
 
@@ -192,9 +192,8 @@ async function verifyBybit(input: ExchangeDebugVerifyInput): Promise<DebugVerify
     ok: ok && exchangeCode === 0,
     upstreamStatus: status,
     exchangeCode: typeof exchangeCode === 'number' ? exchangeCode : null,
-    exchangeMessage,
-    requestPath,
-    payload: body,
+    exchangeMessage: redactDebugText(exchangeMessage),
+    requestPath: publicDebugRequestPath(requestPath),
   }
 }
 
@@ -232,9 +231,8 @@ async function verifyBitget(input: ExchangeDebugVerifyInput): Promise<DebugVerif
     ok: ok && exchangeCode === '00000',
     upstreamStatus: status,
     exchangeCode: typeof exchangeCode === 'string' ? exchangeCode : null,
-    exchangeMessage,
-    requestPath,
-    payload: body,
+    exchangeMessage: redactDebugText(exchangeMessage),
+    requestPath: publicDebugRequestPath(requestPath),
   }
 }
 
@@ -280,9 +278,8 @@ async function verifyGateio(input: ExchangeDebugVerifyInput): Promise<DebugVerif
     ok: ok && payloadOk,
     upstreamStatus: status,
     exchangeCode,
-    exchangeMessage,
-    requestPath,
-    payload: body,
+    exchangeMessage: redactDebugText(exchangeMessage),
+    requestPath: publicDebugRequestPath(requestPath),
   }
 }
 
@@ -356,8 +353,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const supabase = await createSupabaseServerClient()
     const authResult = await supabase.auth.getUser()
     user = authResult.data.user
-  } catch (error) {
-    console.error('[exchange/debug/verify] auth service unavailable:', error)
+  } catch {
+    console.error('[exchange/debug/verify] auth service unavailable')
     return NextResponse.json(
       { success: false, data: null, error: 'AUTH_SERVICE_UNAVAILABLE' },
       { status: 503 }
@@ -423,7 +420,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json(
       {
         success: true,
-        data: {
+        data: buildPublicDebugVerifyData({
           exchange: input.exchange,
           verified: result.ok,
           upstreamStatus: result.upstreamStatus,
@@ -431,8 +428,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           exchangeMessage: result.exchangeMessage,
           requestPath: result.requestPath,
           hints,
-          payload: result.payload,
-        },
+        }),
         error: null,
       },
       { status: result.ok ? 200 : 400 }
