@@ -1,6 +1,11 @@
 import { createHash, createHmac } from 'crypto'
 import { NextRequest, NextResponse } from 'next/server'
 import { signOkxRequest } from '@/lib/adapters/okxApi'
+import { createSupabaseServerClient } from '@/lib/db/supabase-server'
+import {
+  isExchangeDebugVerifyEnabled,
+  resolveDebugBaseUrl,
+} from '@/lib/security/exchangeDebugAccess'
 import {
   ExchangeDebugVerifySchema,
   type ExchangeDebugVerifyInput,
@@ -13,20 +18,6 @@ type DebugVerifyResult = {
   exchangeMessage: string | null
   requestPath: string
   payload: unknown
-}
-
-const CORS_HEADERS: Record<string, string> = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-}
-
-function jsonWithCors(body: unknown, init?: ResponseInit): NextResponse {
-  const response = NextResponse.json(body, init)
-  Object.entries(CORS_HEADERS).forEach(([key, value]) => {
-    response.headers.set(key, value)
-  })
-  return response
 }
 
 function signBinance(query: string, secret: string): string {
@@ -68,17 +59,14 @@ function signGateio(
   return createHmac('sha512', secret).update(payload).digest('hex')
 }
 
-function normalizeBaseUrl(input: string | undefined, fallback: string): string {
-  const raw = input?.trim()
-  if (!raw) return fallback
-  return raw.replace(/\/+$/, '')
-}
-
 async function fetchJson(
   url: string,
   init: RequestInit
 ): Promise<{ status: number; ok: boolean; body: unknown }> {
-  const response = await fetch(url, init)
+  const response = await fetch(url, { ...init, redirect: 'manual' })
+  if (response.status >= 300 && response.status < 400) {
+    return { status: response.status, ok: false, body: null }
+  }
   const text = await response.text()
   let body: unknown = null
   try {
@@ -100,7 +88,7 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 }
 
 async function verifyBinance(input: ExchangeDebugVerifyInput): Promise<DebugVerifyResult> {
-  const baseUrl = normalizeBaseUrl(input.baseUrl, 'https://api.binance.com')
+  const baseUrl = input.baseUrl ?? 'https://api.binance.com'
   const recvWindow = input.recvWindow ?? 5000
   const timestamp = Date.now()
   const query = new URLSearchParams({
@@ -136,7 +124,7 @@ async function verifyBinance(input: ExchangeDebugVerifyInput): Promise<DebugVeri
 }
 
 async function verifyOkx(input: ExchangeDebugVerifyInput): Promise<DebugVerifyResult> {
-  const baseUrl = normalizeBaseUrl(input.baseUrl, 'https://www.okx.com')
+  const baseUrl = input.baseUrl ?? 'https://www.okx.com'
   const ccy = input.ccy?.trim()
   const requestPath = ccy
     ? `/api/v5/account/balance?ccy=${encodeURIComponent(ccy)}`
@@ -173,7 +161,7 @@ async function verifyOkx(input: ExchangeDebugVerifyInput): Promise<DebugVerifyRe
 }
 
 async function verifyBybit(input: ExchangeDebugVerifyInput): Promise<DebugVerifyResult> {
-  const baseUrl = normalizeBaseUrl(input.baseUrl, 'https://api.bybit.com')
+  const baseUrl = input.baseUrl ?? 'https://api.bybit.com'
   const recvWindow = input.recvWindow ?? 5000
   const accountType = (input.accountType ?? 'UNIFIED').trim()
   const queryString = `accountType=${encodeURIComponent(accountType)}`
@@ -211,7 +199,7 @@ async function verifyBybit(input: ExchangeDebugVerifyInput): Promise<DebugVerify
 }
 
 async function verifyBitget(input: ExchangeDebugVerifyInput): Promise<DebugVerifyResult> {
-  const baseUrl = normalizeBaseUrl(input.baseUrl, 'https://api.bitget.com')
+  const baseUrl = input.baseUrl ?? 'https://api.bitget.com'
   const requestPath = '/api/v2/spot/account/assets'
   const timestamp = Date.now().toString()
   const signature = signBitget(timestamp, 'GET', requestPath, '', input.apiSecret)
@@ -251,7 +239,7 @@ async function verifyBitget(input: ExchangeDebugVerifyInput): Promise<DebugVerif
 }
 
 async function verifyGateio(input: ExchangeDebugVerifyInput): Promise<DebugVerifyResult> {
-  const baseUrl = normalizeBaseUrl(input.baseUrl, 'https://api.gateio.ws')
+  const baseUrl = input.baseUrl ?? 'https://api.gateio.ws'
   const apiPath = '/api/v4/spot/accounts'
   const signPath = '/spot/accounts'
   const queryString = 'currency=USDT'
@@ -356,11 +344,38 @@ function buildHints(exchange: string, result: DebugVerifyResult): string[] {
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  if (!isExchangeDebugVerifyEnabled(process.env)) {
+    return NextResponse.json(
+      { success: false, data: null, error: 'NOT_FOUND' },
+      { status: 404 }
+    )
+  }
+
+  let user: { id: string } | null = null
+  try {
+    const supabase = await createSupabaseServerClient()
+    const authResult = await supabase.auth.getUser()
+    user = authResult.data.user
+  } catch (error) {
+    console.error('[exchange/debug/verify] auth service unavailable:', error)
+    return NextResponse.json(
+      { success: false, data: null, error: 'AUTH_SERVICE_UNAVAILABLE' },
+      { status: 503 }
+    )
+  }
+
+  if (!user) {
+    return NextResponse.json(
+      { success: false, data: null, error: 'UNAUTHORIZED' },
+      { status: 401 }
+    )
+  }
+
   let body: unknown
   try {
     body = await req.json()
   } catch {
-    return jsonWithCors(
+    return NextResponse.json(
       { success: false, data: null, error: 'VALIDATION_ERROR' },
       { status: 400 }
     )
@@ -368,16 +383,24 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   const parsed = ExchangeDebugVerifySchema.safeParse(body)
   if (!parsed.success) {
-    return jsonWithCors(
+    return NextResponse.json(
       { success: false, data: null, error: 'VALIDATION_ERROR' },
       { status: 400 }
     )
   }
 
   const input = parsed.data
+  const resolvedBaseUrl = resolveDebugBaseUrl(input.exchange, input.baseUrl)
+  if (!resolvedBaseUrl.ok) {
+    return NextResponse.json(
+      { success: false, data: null, error: 'VALIDATION_ERROR' },
+      { status: 400 }
+    )
+  }
+  input.baseUrl = resolvedBaseUrl.baseUrl
 
   if ((input.exchange === 'okx' || input.exchange === 'bitget') && !input.passphrase) {
-    return jsonWithCors(
+    return NextResponse.json(
       { success: false, data: null, error: 'PASSPHRASE_REQUIRED' },
       { status: 400 }
     )
@@ -397,7 +420,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     const hints = buildHints(input.exchange, result)
 
-    return jsonWithCors(
+    return NextResponse.json(
       {
         success: true,
         data: {
@@ -415,7 +438,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       { status: result.ok ? 200 : 400 }
     )
   } catch {
-    return jsonWithCors(
+    return NextResponse.json(
       {
         success: false,
         data: null,
@@ -424,11 +447,4 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       { status: 502 }
     )
   }
-}
-
-export async function OPTIONS(): Promise<NextResponse> {
-  return new NextResponse(null, {
-    status: 204,
-    headers: CORS_HEADERS,
-  })
 }

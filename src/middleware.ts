@@ -1,5 +1,9 @@
 import { createServerClient, type CookieOptions } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
+import {
+  isExchangeDebugPath,
+  isExchangeDebugVerifyEnabled,
+} from '@/lib/security/exchangeDebugAccess'
 
 type MiddlewareAuthUser = { id: string }
 
@@ -21,8 +25,6 @@ const PROTECTED_ROUTES = [
   '/api/ai',
   '/api/profile',
 ]
-
-const PUBLIC_API_ROUTES = ['/api/exchange/debug/verify']
 
 const AUTH_ROUTES = ['/login', '/register']
 
@@ -53,7 +55,6 @@ async function getUserWithRetry(
 export async function middleware(request: NextRequest): Promise<NextResponse> {
   let response = NextResponse.next({ request })
   const { pathname } = request.nextUrl
-  const isPublicApiRoute = PUBLIC_API_ROUTES.some((route) => pathname.startsWith(route))
   const isProtected = PROTECTED_ROUTES.some((route) => pathname.startsWith(route))
   const isAuthRoute = AUTH_ROUTES.some((route) => pathname.startsWith(route))
   const hasAuthCookie = hasSupabaseAuthCookie(request)
@@ -69,8 +70,11 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     }
   }
 
-  if (isPublicApiRoute) {
-    return response
+  if (isExchangeDebugPath(pathname) && !isExchangeDebugVerifyEnabled(process.env)) {
+    return NextResponse.json(
+      { success: false, data: null, error: 'NOT_FOUND' },
+      { status: 404 }
+    )
   }
 
   if (!isProtected && !isAuthRoute) {
@@ -119,7 +123,7 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     )
   }
 
-  if (isProtected && !user && isApiRoute && !isPublicApiRoute) {
+  if (isProtected && !user && isApiRoute) {
     return NextResponse.json(
       { success: false, data: null, error: 'UNAUTHORIZED' },
       { status: 401 }
