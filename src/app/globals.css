@@ -2,9 +2,13 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  --font-manrope: 'Manrope', ui-sans-serif, system-ui, sans-serif;
+}
+
 @layer base {
   body {
-    font-family: var(--font-manrope), sans-serif;
+    font-family: var(--font-manrope);
   }
 }
 
