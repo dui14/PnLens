@@ -2,7 +2,7 @@
 
 Audit date: 2026-11-09. Branch: `next`. This file records the audit. It does not replace `spec/features/`.
 
-## P0 — Debug route lockdown
+## P0 — Debug ~~~~route lockdown
 
 Status after P0.1: implemented, including the follow-up below. Live HTTP was not exercised. Proof is the commands in `spec/features/debug-route-lockdown.md`.
 
@@ -46,7 +46,7 @@ These were not changed:
 - `fee` and `funding_fee` are ignored by `calculatePNLSummary`. A `null` `realized_pnl` stays in `trade_count` and out of `total_pnl`.
 - A non-numeric `realized_pnl` becomes `NaN` and poisons `total_pnl`.
 - Summary money is rounded to 8 decimal places. Calendar money is rounded to 4.
-- Chart and calendar keys use local date fields. With `TZ=Asia/Bangkok`, `2026-01-01T20:30:00.000Z` lands on `2026-01-02`. `spec/features/pnl-utc-buckets.md` is still todo.
+- Chart and calendar keys use local date fields, so the bucket follows the server zone. The target is fixed UTC+7 from `APP_UTC_OFFSET_MINUTES = 420` (`spec/features/pnl-day-boundary.md`). `2026-01-01T20:30:00.000Z` is 2 January at that offset.
 - `getDateRangeForPeriod('year')` is a rolling year via `setFullYear`, not calendar year-to-date. An unknown range leaves `startDate` undefined.
 - Bitget `cTime` of `1710000000` is parsed as milliseconds, so the timestamp is in 1970. A non-numeric Bitget `cTime` throws `RangeError` from `toISOString` and fails `fetchTrades`. OKX, Bybit, and Gate substitute the current time.
 - OKX `BTC-USDT-SWAP` becomes `BTCUSDTSWAP`. Bitget `BTCUSDT_UMCBL` becomes `BTCUSDTUMCBL`.
@@ -59,6 +59,7 @@ Classification: partially implemented.
 - `POST /api/exchange/sync` calls `syncExchangeAccount` (`src/lib/services/exchangeService.ts`): load account, decrypt `api_keys` with the service client, `fetchTrades`, `upsertTrades`.
 - `src/lib/db/tradesDb.ts` upserts on `exchange_account_id,external_trade_id`.
 - No automated test proves duplicate database rows stay unique. Adapter HTTP mapping is covered by P1. The one-year lookback is not.
+- Design audit, 2026-11-10, no code or schema change: `spec/features/canonical-trade-data-contract.md`. The ledger is Phase 2 and stays off. Phase 1 writes `trades` (`spec/features/scan-execution.md`) after key validation (`spec/features/exchange-key-validation.md`). Turning the ledger writer on stops new `trades` rows, and the dashboard would show nothing new until a projection spec exists.
 
 ## P3 — AI hardening, user isolation, IDOR
 
@@ -114,7 +115,15 @@ Classification: partially implemented.
 
 ## Sequence
 
-P0 and P0.1 are the security checkpoint. P1 (Vitest, CI, pnlEngine and adapter tests) is in place. P2 can use that runner. P3 and P4 can follow P1. P5 depends on P3. P6 depends on P3 and a decision about where user keys are stored. P7 stays blocked until a production migration plan is approved. P8 is independent and should not land in the same commit as schema or auth changes.
+P0 and P0.1 are the security checkpoint. P1 (Vitest, CI, pnlEngine and adapter tests) is in place.
+
+Phase 1 order after that:
+
+1. Key validation, `spec/features/exchange-key-validation.md`. The live read-only probe and the permission check finish before the account and the key are stored.
+2. Integrity fixes and scan, `spec/features/scan-execution.md`. Scan writes the existing `trades` table. The ledger writer stays off.
+3. Dashboard and the Vietnam day boundary, `spec/features/pnl-day-boundary.md`, `spec/features/pnl-year-ytd.md`, and `spec/features/pnl-date-range.md`. Dashboard and AI read `trades` only.
+
+The ledger in `spec/features/canonical-trade-data-contract.md` is Phase 2. P3 and P5 still depend on chat isolation. P6 depends on P3 and a decision about where user keys are stored. P7 stays blocked until a production migration plan is approved. P8 is independent and should not land in the same commit as schema or auth changes.
 
 ## P0.1 and P1 checks run this session
 
