@@ -77,9 +77,9 @@ describe('BinanceAdapter', () => {
     expect(spot).toMatchObject({
       symbol: 'BTCUSDT',
       side: 'buy',
-      quantity: 0.00000001,
-      price: 65000.12345678,
-      fee: 0.00000001,
+      quantity: '0.00000001',
+      price: '65000.12345678',
+      fee: '0.00000001',
       fee_currency: 'BNB',
       realized_pnl: null,
       trade_type: 'spot',
@@ -88,10 +88,10 @@ describe('BinanceAdapter', () => {
     expect(futures).toMatchObject({
       symbol: 'ETHUSDT',
       side: 'sell',
-      quantity: 1.25,
-      price: 2400.5,
-      fee: 0.05,
-      realized_pnl: -3.25,
+      quantity: '1.2500',
+      price: '2400.50',
+      fee: '0.0500',
+      realized_pnl: '-3.25',
       trade_type: 'futures',
       traded_at: new Date(spotTime).toISOString(),
     })
@@ -188,6 +188,18 @@ describe('BinanceAdapter', () => {
     expect(trades.some((trade) => trade.external_trade_id === 'spot_42')).toBe(true)
   })
 
+  it('keeps one spot fill when the same id is returned twice', async () => {
+    http.handler = (url) => {
+      if (url.includes('/api/v3/myTrades') && url.includes('symbol=BTCUSDT')) {
+        return jsonResponse([spotTrade(42), spotTrade(42)])
+      }
+      return defaultRoute(url)
+    }
+
+    const trades = await new BinanceAdapter().fetchTrades(credentials, recentSince())
+    expect(trades.filter((trade) => trade.external_trade_id === 'spot_42')).toHaveLength(1)
+  })
+
   it('keeps one futures trade when the external id is duplicated', async () => {
     http.handler = (url) => {
       if (url.includes('/fapi/v1/userTrades') && url.includes('symbol=BTCUSDT') && !url.includes('startTime=')) {
@@ -229,6 +241,36 @@ describe('BinanceAdapter', () => {
     const trades = await new BinanceAdapter().fetchTrades(credentials, recentSince())
     expect(calls.length).toBeGreaterThanOrEqual(2)
     expect(trades.filter((trade) => trade.income_type === 'REALIZED_PNL')).toHaveLength(1000)
+    expect(JSON.stringify(calls).includes(credentials.apiSecret)).toBe(false)
+  })
+
+  it('keeps income pages until a short page', async () => {
+    const calls: string[] = []
+    const pageTime = Date.now() - 60_000
+    http.handler = (url) => {
+      if (url.includes('/fapi/v1/income') && url.includes('incomeType=REALIZED_PNL')) {
+        calls.push(url)
+        const page = calls.length
+        const length = page < 3 ? 1000 : 1
+        return jsonResponse(
+          Array.from({ length }, (_, index) => ({
+            symbol: 'BTCUSDT',
+            incomeType: 'REALIZED_PNL',
+            income: '0.01',
+            asset: 'USDT',
+            info: '',
+            time: pageTime + page * 1000 + index,
+            tranId: page * 1000 + index + 1,
+            tradeId: String(page * 1000 + index + 1),
+          }))
+        )
+      }
+      return defaultRoute(url)
+    }
+
+    const trades = await new BinanceAdapter().fetchTrades(credentials, recentSince())
+    expect(calls.length).toBeGreaterThanOrEqual(3)
+    expect(trades.filter((trade) => trade.income_type === 'REALIZED_PNL')).toHaveLength(2001)
     expect(JSON.stringify(calls).includes(credentials.apiSecret)).toBe(false)
   })
 })

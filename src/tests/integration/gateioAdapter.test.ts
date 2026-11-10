@@ -57,9 +57,9 @@ describe('GateioAdapter', () => {
         external_trade_id: 'spot-1',
         symbol: 'BTCUSDT',
         side: 'sell',
-        quantity: 0.015,
-        price: 65000.25,
-        fee: 0.01,
+        quantity: '-0.01500000',
+        price: '65000.2500',
+        fee: '-0.0100',
         fee_currency: 'USDT',
         realized_pnl: null,
         trade_type: 'spot',
@@ -69,12 +69,22 @@ describe('GateioAdapter', () => {
     expect(JSON.stringify(trades).includes(credentials.apiSecret)).toBe(false)
   })
 
-  it('treats a small create_time as seconds and a bad amount as zero', async () => {
+  it('treats a small create_time as seconds and drops a malformed amount', async () => {
     handler = (url) => {
       if (url.includes('/spot/my_trades')) {
         return jsonResponse([
           {
             id: 'seconds',
+            currency_pair: 'BTC_USDT',
+            side: 'buy',
+            amount: '1.5',
+            price: '1',
+            fee: '0',
+            fee_currency: 'USDT',
+            create_time: '1710000000',
+          },
+          {
+            id: 'bad-amount',
             currency_pair: 'BTC_USDT',
             side: 'buy',
             amount: 'bad',
@@ -89,29 +99,29 @@ describe('GateioAdapter', () => {
     }
 
     const trades = await new GateioAdapter().fetchTrades(credentials, recentSince())
+    expect(trades.map((trade) => trade.external_trade_id)).toEqual(['seconds'])
     expect(trades[0]).toMatchObject({
-      external_trade_id: 'seconds',
-      quantity: 0,
+      quantity: '1.5',
       traded_at: new Date(1710000000 * 1000).toISOString(),
     })
   })
 
-  it('uses the current time when the timestamp cannot be parsed', async () => {
-    const before = Date.now()
+  it('drops a spot trade whose timestamp cannot be parsed', async () => {
     handler = (url) => {
       if (url.includes('/spot/my_trades')) {
-        return jsonResponse([spotTrade({ create_time_ms: 'not-a-time' })])
+        return jsonResponse([
+          spotTrade({ create_time_ms: 'not-a-time', id: 'bad-ts' }),
+          spotTrade({ id: 'spot-ok' }),
+        ])
       }
       return defaultRoute(url)
     }
 
     const trades = await new GateioAdapter().fetchTrades(credentials, recentSince())
-    const tradedAtMs = new Date(trades[0]?.traded_at ?? '').getTime()
-    expect(tradedAtMs).toBeGreaterThanOrEqual(before)
-    expect(tradedAtMs).toBeLessThanOrEqual(Date.now() + 1000)
+    expect(trades.map((trade) => trade.external_trade_id)).toEqual(['spot-ok'])
   })
 
-  it('scales a futures contract and maps a short position', async () => {
+  it('keeps the futures fill size and maps a short position', async () => {
     handler = (url) => {
       if (url.includes('/futures/usdt/my_trades_timerange')) {
         return jsonResponse([
@@ -148,8 +158,8 @@ describe('GateioAdapter', () => {
     expect(futures).toMatchObject({
       symbol: 'BTCUSDT',
       side: 'sell',
-      quantity: 3 * 0.0001,
-      realized_pnl: 8.5,
+      quantity: '-3',
+      realized_pnl: '8.5',
       trade_type: 'futures',
     })
 

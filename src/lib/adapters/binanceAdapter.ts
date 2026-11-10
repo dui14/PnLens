@@ -14,6 +14,13 @@ import {
 } from './credentialValidation'
 import { BINANCE_BASE_URL as BASE_URL, BINANCE_FUTURES_BASE_URL as FUTURES_URL } from './exchangeBases'
 import { fetchExchange } from './httpClient'
+import {
+  TradeRejectCounter,
+  epochMillisToIso,
+  optionalDecimal,
+  requiredDecimal,
+  type TradeRejectCounts,
+} from './tradeFields'
 const REQUEST_TIMEOUT = 10_000
 const RECV_WINDOW = 10_000
 const DEFAULT_LOOKBACK_MS = 365 * 24 * 60 * 60 * 1000
@@ -87,6 +94,11 @@ async function fetchWithRetry(
 
 export class BinanceAdapter implements ExchangeAdapter {
   private proxy: string | null = null
+  private readonly rejections = new TradeRejectCounter()
+
+  rejectedTradeCounts(): TradeRejectCounts {
+    return this.rejections.counts
+  }
 
   private restrictionsCache:
     | {
@@ -243,6 +255,7 @@ export class BinanceAdapter implements ExchangeAdapter {
     credentials: ExchangeCredentials,
     since?: Date
   ): Promise<ExchangeAdapterTrade[]> {
+    this.rejections.reset()
     return this.withProxy(credentials, async () => {
       const [spotTrades, futuresTrades] = await Promise.all([
         this.fetchSpotTrades(credentials.apiKey, credentials.apiSecret, since),
@@ -281,7 +294,7 @@ export class BinanceAdapter implements ExchangeAdapter {
       const trades = await this.fetchSpotTradesForSymbol(apiKey, apiSecret, symbol, startTime)
       allTrades.push(...trades)
     }
-    return allTrades
+    return this.deduplicateFuturesTrades(allTrades)
   }
 
   private async fetchSpotTradesForSymbol(
@@ -311,7 +324,12 @@ export class BinanceAdapter implements ExchangeAdapter {
     }
 
     const data = (await response.json()) as BinanceSpotTrade[]
-    return data.map((t) => this.normalizeSpotTrade(t))
+    const trades: ExchangeAdapterTrade[] = []
+    for (const row of data) {
+      const normalized = this.normalizeSpotTrade(row)
+      if (normalized) trades.push(normalized)
+    }
+    return trades
   }
 
   private async fetchFuturesTrades(
@@ -455,7 +473,10 @@ export class BinanceAdapter implements ExchangeAdapter {
 
         return true
       })
-      .map((record) => this.normalizeFuturesIncome(record))
+      .flatMap((record) => {
+        const normalized = this.normalizeFuturesIncome(record)
+        return normalized ? [normalized] : []
+      })
   }
 
   private async fetchFuturesIncome(
@@ -513,7 +534,7 @@ export class BinanceAdapter implements ExchangeAdapter {
 
           maxSeenTime = Math.max(maxSeenTime, pageMaxTime)
 
-          if (data.length < 1000) {
+          if (data.length < 1000 || pageMaxTime + 1 <= pageStart) {
             pageStart = endTime + 1
           } else {
             pageStart = pageMaxTime + 1
@@ -575,9 +596,12 @@ export class BinanceAdapter implements ExchangeAdapter {
       await sleep(80)
     }
 
-    return allTrades
-      .sort((a, b) => a.time - b.time)
-      .map((t) => this.normalizeFuturesTrade(t))
+    const trades: ExchangeAdapterTrade[] = []
+    for (const row of allTrades.sort((a, b) => a.time - b.time)) {
+      const normalized = this.normalizeFuturesTrade(row)
+      if (normalized) trades.push(normalized)
+    }
+    return trades
   }
 
   private async fetchRecentFuturesTradesForSymbol(
@@ -609,61 +633,92 @@ export class BinanceAdapter implements ExchangeAdapter {
       return []
     }
 
-    return data
-      .sort((a, b) => a.time - b.time)
-      .map((trade) => this.normalizeFuturesTrade(trade))
+    const trades: ExchangeAdapterTrade[] = []
+    for (const row of data.sort((a, b) => a.time - b.time)) {
+      const normalized = this.normalizeFuturesTrade(row)
+      if (normalized) trades.push(normalized)
+    }
+    return trades
   }
 
-  private normalizeSpotTrade(t: BinanceSpotTrade): ExchangeAdapterTrade {
+  private normalizeSpotTrade(t: BinanceSpotTrade): ExchangeAdapterTrade | null {
+    const tradedAt = epochMillisToIso(t.time)
+    if (!tradedAt) return this.rejections.reject('INVALID_TIMESTAMP')
+    const quantity = requiredDecimal(t.qty, this.rejections)
+    if (!quantity) return null
+    const price = requiredDecimal(t.price, this.rejections)
+    if (!price) return null
+    const fee = requiredDecimal(t.commission, this.rejections)
+    if (!fee) return null
+    const id = String(t.id ?? '').trim()
+    if (!id) return this.rejections.reject('MISSING_ID')
     return {
-      external_trade_id: `spot_${t.id}`,
+      external_trade_id: `spot_${id}`,
       symbol: t.symbol,
       side: t.isBuyer ? 'buy' : 'sell',
-      quantity: parseFloat(t.qty),
-      price: parseFloat(t.price),
-      fee: parseFloat(t.commission),
+      quantity,
+      price,
+      fee,
       fee_currency: t.commissionAsset,
       realized_pnl: null,
       trade_type: 'spot',
-      traded_at: new Date(t.time).toISOString(),
+      traded_at: tradedAt,
       raw_data: t as unknown as Record<string, unknown>,
     }
   }
 
-  private normalizeFuturesTrade(t: BinanceFuturesTrade): ExchangeAdapterTrade {
+  private normalizeFuturesTrade(t: BinanceFuturesTrade): ExchangeAdapterTrade | null {
+    const tradedAt = epochMillisToIso(t.time)
+    if (!tradedAt) return this.rejections.reject('INVALID_TIMESTAMP')
+    const quantity = requiredDecimal(t.qty, this.rejections)
+    if (!quantity) return null
+    const price = requiredDecimal(t.price, this.rejections)
+    if (!price) return null
+    const fee = requiredDecimal(t.commission, this.rejections)
+    if (!fee) return null
+    const realizedPnl = optionalDecimal(t.realizedPnl, this.rejections)
+    if (realizedPnl === undefined) return null
+    const id = String(t.id ?? '').trim()
+    if (!id) return this.rejections.reject('MISSING_ID')
+    const side = t.side.toLowerCase() === 'sell' ? 'sell' : 'buy'
     return {
-      external_trade_id: `futures_${t.id}`,
+      external_trade_id: `futures_${id}`,
       symbol: t.symbol,
-      side: t.side.toLowerCase() as 'buy' | 'sell',
-      quantity: parseFloat(t.qty),
-      price: parseFloat(t.price),
-      fee: parseFloat(t.commission),
+      side,
+      quantity,
+      price,
+      fee,
       fee_currency: t.commissionAsset,
-      realized_pnl: parseFloat(t.realizedPnl),
+      realized_pnl: realizedPnl,
       trade_type: 'futures',
-      traded_at: new Date(t.time).toISOString(),
+      traded_at: tradedAt,
       raw_data: t as unknown as Record<string, unknown>,
     }
   }
 
-  private normalizeFuturesIncome(r: BinanceFuturesIncome): ExchangeAdapterTrade {
-    const incomeValue = parseFloat(r.income)
-    const fundingFee = r.incomeType === 'FUNDING_FEE' ? incomeValue : 0
+  private normalizeFuturesIncome(r: BinanceFuturesIncome): ExchangeAdapterTrade | null {
+    const tradedAt = epochMillisToIso(r.time)
+    if (!tradedAt) return this.rejections.reject('INVALID_TIMESTAMP')
+    const incomeValue = requiredDecimal(r.income, this.rejections)
+    if (!incomeValue) return null
     const incomeType = String(r.incomeType ?? '').trim().toLowerCase() || 'unknown'
     const tradeId = String(r.tradeId ?? '').trim() || 'na'
+    const tranId = String(r.tranId ?? '').trim()
+    if (!tranId) return this.rejections.reject('MISSING_ID')
+    const negative = incomeValue.startsWith('-') && !/^-0(\.0+)?$/.test(incomeValue)
     return {
-      external_trade_id: `futures_income_${incomeType}_${r.tranId}_${r.time}_${tradeId}`,
+      external_trade_id: `futures_income_${incomeType}_${tranId}_${r.time}_${tradeId}`,
       symbol: r.symbol,
-      side: incomeValue >= 0 ? 'sell' : 'buy',
-      quantity: 0,
-      price: 0,
-      fee: 0,
+      side: negative ? 'buy' : 'sell',
+      quantity: '0',
+      price: '0',
+      fee: '0',
       fee_currency: r.asset,
       realized_pnl: incomeValue,
-      funding_fee: fundingFee,
+      funding_fee: r.incomeType === 'FUNDING_FEE' ? incomeValue : '0',
       income_type: r.incomeType,
       trade_type: 'futures',
-      traded_at: new Date(r.time).toISOString(),
+      traded_at: tradedAt,
       raw_data: r as unknown as Record<string, unknown>,
     }
   }

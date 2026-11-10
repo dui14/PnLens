@@ -14,6 +14,16 @@ import {
 } from './credentialValidation'
 
 import { OKX_BASE_URL as BASE_URL } from './exchangeBases'
+import {
+  TradeRejectCounter,
+  addDecimals,
+  decimalOrZero,
+  flexibleTimeToIso,
+  isNegativeDecimal,
+  optionalDecimal,
+  requiredDecimal,
+  type TradeRejectCounts,
+} from './tradeFields'
 const REQUEST_TIMEOUT = 10_000
 const DEFAULT_LOOKBACK_MS = 365 * 24 * 60 * 60 * 1000
 const OKX_HISTORY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
@@ -45,6 +55,11 @@ async function fetchWithRetry(url: string, options?: RequestInit, attempt = 0): 
 
 export class OKXAdapter implements ExchangeAdapter {
   private futuresContractSpecsPromise: Promise<Map<string, OKXFuturesContractSpec>> | null = null
+  private readonly rejections = new TradeRejectCounter()
+
+  rejectedTradeCounts(): TradeRejectCounts {
+    return this.rejections.counts
+  }
 
   private buildHeaders(
     credentials: ExchangeCredentials,
@@ -90,6 +105,7 @@ export class OKXAdapter implements ExchangeAdapter {
   }
 
   async fetchTrades(credentials: ExchangeCredentials, since?: Date): Promise<ExchangeAdapterTrade[]> {
+    this.rejections.reset()
     const startDate = since ?? new Date(Date.now() - DEFAULT_LOOKBACK_MS)
     const futuresContractSpecs = await this.getFuturesContractSpecs()
 
@@ -145,7 +161,7 @@ export class OKXAdapter implements ExchangeAdapter {
           let oldestTs = cursorEnd
           for (const item of list) {
             const normalized = this.normalizeFill(item, futuresContractSpecs)
-            rows.push(normalized)
+            if (normalized) rows.push(normalized)
 
             const itemTs = Number.parseInt(String(item.ts ?? ''), 10)
             if (Number.isFinite(itemTs)) {
@@ -205,7 +221,8 @@ export class OKXAdapter implements ExchangeAdapter {
 
         let oldestTs = cursorEnd
         for (const item of list) {
-          rows.push(this.normalizeFundingBill(item))
+          const normalized = this.normalizeFundingBill(item)
+          if (normalized) rows.push(normalized)
 
           const itemTs = Number.parseInt(String(item.ts ?? ''), 10)
           if (Number.isFinite(itemTs)) {
@@ -263,7 +280,8 @@ export class OKXAdapter implements ExchangeAdapter {
         let oldestTs = cursorEnd
         for (const item of list) {
           if (!['2', '8', '14'].includes(String(item.type ?? ''))) continue
-          rows.push(this.normalizeBill(item, futuresContractSpecs))
+          const normalized = this.normalizeBill(item, futuresContractSpecs)
+          if (normalized) rows.push(normalized)
 
           const itemTs = Number.parseInt(String(item.ts ?? ''), 10)
           if (Number.isFinite(itemTs)) {
@@ -345,82 +363,68 @@ export class OKXAdapter implements ExchangeAdapter {
 
   private normalizeBill(
     bill: OKXBill,
-    futuresContractSpecs: Map<string, OKXFuturesContractSpec>
-  ): ExchangeAdapterTrade {
-    const pnl = parseFloat(bill.pnl ?? '0')
-    const fee = parseFloat(bill.fee ?? '0')
-    const amount = pnl + fee
-    const side: 'buy' | 'sell' = amount >= 0 ? 'sell' : 'buy'
-    const rawQuantity = parseFloat(bill.sz ?? '0')
-    const rawPrice = parseFloat(bill.px ?? '0')
-    const quantity = this.normalizeFuturesQuantity(
-      bill.instType,
-      bill.instId,
-      rawQuantity,
-      rawPrice,
-      futuresContractSpecs
-    )
-
+    _futuresContractSpecs: Map<string, OKXFuturesContractSpec>
+  ): ExchangeAdapterTrade | null {
+    const tradedAt = flexibleTimeToIso(bill.ts)
+    if (!tradedAt) return this.rejections.reject('INVALID_TIMESTAMP')
+    const billId = String(bill.billId ?? '').trim()
+    if (!billId) return this.rejections.reject('MISSING_ID')
+    const pnl = decimalOrZero(bill.pnl, this.rejections)
+    if (!pnl) return null
+    const fee = decimalOrZero(bill.fee, this.rejections)
+    if (!fee) return null
+    const amount = addDecimals(pnl, fee)
+    if (!amount) return this.rejections.reject('INVALID_NUMBER')
+    const quantity = decimalOrZero(bill.sz, this.rejections)
+    if (!quantity) return null
+    const price = decimalOrZero(bill.px, this.rejections)
+    if (!price) return null
     return {
-      external_trade_id: `okx_bill_${bill.billId}`,
+      external_trade_id: `okx_bill_${billId}`,
       symbol: (bill.instId ?? '').replace(/-/g, ''),
-      side,
+      side: isNegativeDecimal(amount) ? 'buy' : 'sell',
       quantity,
-      price: Number.isFinite(rawPrice) ? rawPrice : 0,
-      fee: Math.abs(fee),
+      price,
+      fee,
       fee_currency: bill.ccy ?? 'USDT',
       realized_pnl: amount,
-      funding_fee: bill.type === '8' ? fee : 0,
+      funding_fee: bill.type === '8' ? fee : '0',
       income_type: bill.type,
       trade_type: bill.instType === 'SPOT' ? 'spot' : 'futures',
-      traded_at: new Date(parseInt(bill.ts, 10)).toISOString(),
+      traded_at: tradedAt,
       raw_data: bill as unknown as Record<string, unknown>,
     }
   }
 
   private normalizeFill(
     fill: OKXFill,
-    futuresContractSpecs: Map<string, OKXFuturesContractSpec>
-  ): ExchangeAdapterTrade {
-    const symbol = (fill.instId ?? '').replace(/-/g, '')
-    const side: 'buy' | 'sell' = (fill.side ?? '').toLowerCase() === 'sell' ? 'sell' : 'buy'
+    _futuresContractSpecs: Map<string, OKXFuturesContractSpec>
+  ): ExchangeAdapterTrade | null {
+    const tradedAt = flexibleTimeToIso(fill.ts)
+    if (!tradedAt) return this.rejections.reject('INVALID_TIMESTAMP')
+    const tradeId = String(fill.tradeId ?? fill.ordId ?? '').trim()
+    if (!tradeId) return this.rejections.reject('MISSING_ID')
+    const quantity = requiredDecimal(fill.fillSz, this.rejections)
+    if (!quantity) return null
+    const price = requiredDecimal(fill.fillPx, this.rejections)
+    if (!price) return null
+    const fee = decimalOrZero(fill.fillFee, this.rejections)
+    if (!fee) return null
+    const realizedPnl = optionalDecimal(fill.fillPnl, this.rejections)
+    if (realizedPnl === undefined) return null
     const instType = String(fill.instType ?? '').toUpperCase()
-
-    const rawQuantity = parseFloat(fill.fillSz ?? '0')
-    const rawPrice = parseFloat(fill.fillPx ?? '0')
-    const rawFee = parseFloat(fill.fillFee ?? '0')
-    const rawPnl = parseFloat(fill.fillPnl ?? '')
-    const parsedTs = Number.parseInt(String(fill.ts ?? ''), 10)
-
-    const price = Number.isFinite(rawPrice) ? rawPrice : 0
-    const quantity = this.normalizeFuturesQuantity(
-      instType,
-      fill.instId,
-      rawQuantity,
-      price,
-      futuresContractSpecs
-    )
-    const fee = Number.isFinite(rawFee) ? Math.abs(rawFee) : 0
-    const realizedPnl = Number.isFinite(rawPnl) ? rawPnl : null
-    const tradedAt = Number.isFinite(parsedTs)
-      ? new Date(parsedTs).toISOString()
-      : new Date().toISOString()
-
-    const tradeType = instType === 'SPOT' ? 'spot' : 'futures'
-    const tradeId = String(fill.tradeId ?? fill.ordId ?? `${symbol}:${tradedAt}`).trim()
-
     return {
       external_trade_id: `okx_fill_${tradeId}`,
-      symbol,
-      side,
+      symbol: (fill.instId ?? '').replace(/-/g, ''),
+      side: (fill.side ?? '').toLowerCase() === 'sell' ? 'sell' : 'buy',
       quantity,
       price,
       fee,
       fee_currency: fill.fillFeeCcy ?? 'USDT',
       realized_pnl: realizedPnl,
-      funding_fee: 0,
+      funding_fee: '0',
       income_type: fill.execType ?? null,
-      trade_type: tradeType,
+      trade_type: instType === 'SPOT' ? 'spot' : 'futures',
       traded_at: tradedAt,
       raw_data: fill as unknown as Record<string, unknown>,
     }
@@ -483,74 +487,30 @@ export class OKXAdapter implements ExchangeAdapter {
     return specs
   }
 
-  private normalizeFuturesQuantity(
-    instType: string,
-    instId: string | undefined,
-    rawQuantity: number,
-    price: number,
-    futuresContractSpecs: Map<string, OKXFuturesContractSpec>
-  ): number {
-    const quantity = Number.isFinite(rawQuantity) ? Math.abs(rawQuantity) : 0
-    if (quantity === 0) {
-      return 0
-    }
-
-    const upperInstType = instType.toUpperCase()
-    if (upperInstType !== 'SWAP' && upperInstType !== 'FUTURES') {
-      return quantity
-    }
-
-    const instKey = String(instId ?? '').toUpperCase()
-    if (!instKey) {
-      return quantity
-    }
-
-    const contract = futuresContractSpecs.get(instKey)
-    if (!contract || contract.ctVal <= 0) {
-      return quantity
-    }
-
-    if (contract.ctValCcy && contract.baseCcy && contract.ctValCcy === contract.baseCcy) {
-      return quantity * contract.ctVal
-    }
-
-    if (
-      contract.ctValCcy &&
-      contract.quoteCcy &&
-      contract.ctValCcy === contract.quoteCcy &&
-      Number.isFinite(price) &&
-      price > 0
-    ) {
-      return (quantity * contract.ctVal) / price
-    }
-
-    return quantity
-  }
-
-  private normalizeFundingBill(bill: OKXBill): ExchangeAdapterTrade {
-    const pnl = parseFloat(bill.pnl ?? '0')
-    const fee = parseFloat(bill.fee ?? '0')
-    const amount =
-      (Number.isFinite(pnl) ? pnl : 0) +
-      (Number.isFinite(fee) ? fee : 0)
-    const side: 'buy' | 'sell' = amount >= 0 ? 'sell' : 'buy'
-    const parsedTs = Number.parseInt(String(bill.ts ?? ''), 10)
-
+  private normalizeFundingBill(bill: OKXBill): ExchangeAdapterTrade | null {
+    const tradedAt = flexibleTimeToIso(bill.ts)
+    if (!tradedAt) return this.rejections.reject('INVALID_TIMESTAMP')
+    const billId = String(bill.billId ?? '').trim()
+    if (!billId) return this.rejections.reject('MISSING_ID')
+    const pnl = decimalOrZero(bill.pnl, this.rejections)
+    if (!pnl) return null
+    const fee = decimalOrZero(bill.fee, this.rejections)
+    if (!fee) return null
+    const amount = addDecimals(pnl, fee)
+    if (!amount) return this.rejections.reject('INVALID_NUMBER')
     return {
-      external_trade_id: `okx_funding_${bill.billId}`,
+      external_trade_id: `okx_funding_${billId}`,
       symbol: (bill.instId ?? '').replace(/-/g, ''),
-      side,
-      quantity: 0,
-      price: 0,
-      fee: 0,
+      side: isNegativeDecimal(amount) ? 'buy' : 'sell',
+      quantity: '0',
+      price: '0',
+      fee: '0',
       fee_currency: bill.ccy ?? 'USDT',
       realized_pnl: amount,
       funding_fee: amount,
       income_type: 'funding_fee',
       trade_type: bill.instType === 'SPOT' ? 'spot' : 'futures',
-      traded_at: Number.isFinite(parsedTs)
-        ? new Date(parsedTs).toISOString()
-        : new Date().toISOString(),
+      traded_at: tradedAt,
       raw_data: bill as unknown as Record<string, unknown>,
     }
   }

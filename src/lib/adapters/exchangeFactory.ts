@@ -5,10 +5,12 @@ import type {
   UnrealizedPosition,
 } from '@/lib/types'
 import type { CredentialProbeResult } from './credentialValidation'
+import type { TradeRejectCounts } from './tradeFields'
 
 export interface ExchangeAdapter {
   validateCredentials(credentials: ExchangeCredentials): Promise<CredentialProbeResult>
   hasWithdrawPermission(credentials: ExchangeCredentials): Promise<boolean>
+  rejectedTradeCounts(): TradeRejectCounts
   fetchTrades(
     credentials: ExchangeCredentials,
     since?: Date

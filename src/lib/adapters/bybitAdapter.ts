@@ -13,6 +13,16 @@ import {
   type CredentialProbeResult,
 } from './credentialValidation'
 import { fetchExchange } from './httpClient'
+import {
+  TradeRejectCounter,
+  addDecimals,
+  decimalOrZero,
+  flexibleTimeToIso,
+  optionalDecimal,
+  requiredDecimal,
+  venueDecimal,
+  type TradeRejectCounts,
+} from './tradeFields'
 
 import { BYBIT_BASE_URL as BASE_URL } from './exchangeBases'
 const REQUEST_TIMEOUT = 10_000
@@ -70,6 +80,11 @@ async function fetchWithRetry(
 
 export class BybitAdapter implements ExchangeAdapter {
   private proxy: string | null = null
+  private readonly rejections = new TradeRejectCounter()
+
+  rejectedTradeCounts(): TradeRejectCounts {
+    return this.rejections.counts
+  }
 
   private async withProxy<T>(
     _credentials: ExchangeCredentials,
@@ -122,6 +137,7 @@ export class BybitAdapter implements ExchangeAdapter {
   }
 
   async fetchTrades(credentials: ExchangeCredentials, since?: Date): Promise<ExchangeAdapterTrade[]> {
+    this.rejections.reset()
     return this.withProxy(credentials, async () => {
       const startTime = since ? since.getTime() : Date.now() - DEFAULT_LOOKBACK_MS
       const now = Date.now()
@@ -178,7 +194,10 @@ export class BybitAdapter implements ExchangeAdapter {
             await sleep(80)
           }
 
-          const normalizedTrades = allTrades.map((trade) => this.normalizeTrade(trade, tradeType))
+          const normalizedTrades = allTrades.flatMap((trade) => {
+            const normalized = this.normalizeTrade(trade, tradeType)
+            return normalized ? [normalized] : []
+          })
           if (tradeType !== 'futures') {
             return normalizedTrades
           }
@@ -259,20 +278,32 @@ export class BybitAdapter implements ExchangeAdapter {
     })
   }
 
-  private normalizeTrade(trade: BybitTrade, tradeType: 'spot' | 'futures'): ExchangeAdapterTrade {
+  private normalizeTrade(trade: BybitTrade, tradeType: 'spot' | 'futures'): ExchangeAdapterTrade | null {
+    const tradedAt = flexibleTimeToIso(trade.execTime)
+    if (!tradedAt) return this.rejections.reject('INVALID_TIMESTAMP')
+    const externalTradeId = String(trade.execId ?? '').trim()
+    if (!externalTradeId) return this.rejections.reject('MISSING_ID')
+    const quantity = requiredDecimal(trade.execQty, this.rejections)
+    if (!quantity) return null
+    const price = requiredDecimal(trade.execPrice, this.rejections)
+    if (!price) return null
+    const fee = decimalOrZero(trade.execFee, this.rejections)
+    if (!fee) return null
+    const realizedPnl = optionalDecimal(trade.closedPnl, this.rejections)
+    if (realizedPnl === undefined) return null
     return {
-      external_trade_id: trade.execId,
+      external_trade_id: externalTradeId,
       symbol: trade.symbol,
       side: (trade.side ?? 'Buy').toLowerCase() === 'buy' ? 'buy' : 'sell',
-      quantity: parseFloat(trade.execQty ?? '0'),
-      price: parseFloat(trade.execPrice ?? '0'),
-      fee: parseFloat(trade.execFee ?? '0'),
+      quantity,
+      price,
+      fee,
       fee_currency: trade.feeCurrency ?? 'USDT',
-      realized_pnl: trade.closedPnl ? parseFloat(trade.closedPnl) : null,
-      funding_fee: 0,
+      realized_pnl: realizedPnl,
+      funding_fee: '0',
       income_type: trade.execType ?? null,
       trade_type: tradeType,
-      traded_at: this.toIsoTimestamp(trade.execTime),
+      traded_at: tradedAt,
       raw_data: trade as unknown as Record<string, unknown>,
     }
   }
@@ -334,12 +365,12 @@ export class BybitAdapter implements ExchangeAdapter {
     trades: ExchangeAdapterTrade[],
     closedRows: BybitClosedPnl[]
   ): ExchangeAdapterTrade[] {
-    const pnlByOrderId = new Map<string, number>()
+    const pnlByOrderId = new Map<string, string>()
     const syntheticRows: ExchangeAdapterTrade[] = []
 
     for (const row of closedRows) {
-      const pnl = this.parseOptionalNumber(row.closedPnl)
-      if (pnl === null) continue
+      const pnl = optionalDecimal(row.closedPnl, this.rejections)
+      if (pnl === undefined || pnl === null) continue
 
       if (row.orderId) {
         if (!pnlByOrderId.has(row.orderId)) {
@@ -379,8 +410,8 @@ export class BybitAdapter implements ExchangeAdapter {
     for (const row of closedRows) {
       if (!row.orderId || matchedOrderIds.has(row.orderId)) continue
 
-      const pnl = this.parseOptionalNumber(row.closedPnl)
-      if (pnl === null) continue
+      const pnl = venueDecimal(row.closedPnl ?? '')
+      if (!pnl) continue
 
       const normalized = this.normalizeClosedPnlRow(row, pnl)
       if (normalized) {
@@ -391,16 +422,25 @@ export class BybitAdapter implements ExchangeAdapter {
     return [...patchedTrades, ...syntheticRows]
   }
 
-  private normalizeClosedPnlRow(row: BybitClosedPnl, pnl: number): ExchangeAdapterTrade | null {
+  private normalizeClosedPnlRow(row: BybitClosedPnl, pnl: string): ExchangeAdapterTrade | null {
     if (!row.symbol) return null
 
     const side = (row.side ?? '').toLowerCase() === 'sell' ? 'sell' : 'buy'
-    const closeSize = this.parseOptionalNumber(row.closedSize) ?? 0
-    const closePrice = this.parseOptionalNumber(row.avgExitPrice) ?? 0
-    const openFee = this.parseOptionalNumber(row.openFee) ?? 0
-    const closeFee = this.parseOptionalNumber(row.closeFee) ?? 0
-    const fundingFee = this.parseOptionalNumber(row.totalFundingFee) ?? 0
-    const timestamp = row.updatedTime ?? row.createdTime ?? String(Date.now())
+    const closeSize = decimalOrZero(row.closedSize, this.rejections)
+    if (!closeSize) return null
+    const closePrice = decimalOrZero(row.avgExitPrice, this.rejections)
+    if (!closePrice) return null
+    const openFee = decimalOrZero(row.openFee, this.rejections)
+    if (!openFee) return null
+    const closeFee = decimalOrZero(row.closeFee, this.rejections)
+    if (!closeFee) return null
+    const fee = addDecimals(openFee, closeFee)
+    if (!fee) return this.rejections.reject('INVALID_NUMBER')
+    const fundingFee = decimalOrZero(row.totalFundingFee, this.rejections)
+    if (!fundingFee) return null
+    const timestamp = row.updatedTime ?? row.createdTime
+    const tradedAt = flexibleTimeToIso(timestamp)
+    if (!tradedAt || !timestamp) return this.rejections.reject('INVALID_TIMESTAMP')
     const externalTradeId = row.orderId
       ? `closed_pnl_${row.orderId}_${timestamp}`
       : `closed_pnl_${row.symbol}_${timestamp}`
@@ -409,31 +449,17 @@ export class BybitAdapter implements ExchangeAdapter {
       external_trade_id: externalTradeId,
       symbol: row.symbol,
       side,
-      quantity: Math.abs(closeSize),
+      quantity: closeSize,
       price: closePrice,
-      fee: Math.abs(openFee + closeFee),
+      fee,
       fee_currency: row.settleCoin ?? 'USDT',
       realized_pnl: pnl,
       funding_fee: fundingFee,
       income_type: 'closed_pnl',
       trade_type: 'futures',
-      traded_at: this.toIsoTimestamp(timestamp),
+      traded_at: tradedAt,
       raw_data: row as unknown as Record<string, unknown>,
     }
-  }
-
-  private parseOptionalNumber(value: string | undefined): number | null {
-    if (value === undefined || value === null || value === '') return null
-    const parsed = Number(value)
-    if (!Number.isFinite(parsed)) return null
-    return parsed
-  }
-
-  private toIsoTimestamp(value: string): string {
-    const parsed = Number(value)
-    if (!Number.isFinite(parsed)) return new Date().toISOString()
-    const millis = parsed > 1_000_000_000_000 ? parsed : parsed * 1000
-    return new Date(millis).toISOString()
   }
 
   private deduplicateTrades(trades: ExchangeAdapterTrade[]): ExchangeAdapterTrade[] {

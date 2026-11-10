@@ -57,9 +57,9 @@ describe('BitgetAdapter', () => {
         external_trade_id: 'spot-1',
         symbol: 'BTCUSDT',
         side: 'sell',
-        quantity: 0.01,
-        price: 65000.12,
-        fee: 0.04,
+        quantity: '0.01000000',
+        price: '65000.12000000',
+        fee: '0.0400',
         fee_currency: 'USDT',
         realized_pnl: null,
         trade_type: 'spot',
@@ -69,28 +69,29 @@ describe('BitgetAdapter', () => {
     expect(JSON.stringify(trades).includes(credentials.apiSecret)).toBe(false)
   })
 
-  it('interprets a second-based cTime as milliseconds and rejects a non-numeric cTime', async () => {
+  it('reads a 10-digit cTime as seconds and drops a non-numeric cTime', async () => {
     handler = (url) => {
       if (url.includes('/api/v2/spot/trade/fills')) {
-        return jsonResponse({ code: '00000', data: [spotFill({ cTime: '1710000000', tradeId: 'seconds' })] })
+        return jsonResponse({
+          code: '00000',
+          data: [
+            spotFill({ cTime: '1710000000', tradeId: 'seconds' }),
+            spotFill({ cTime: '1710000000000', tradeId: 'millis' }),
+            spotFill({ cTime: 'not-a-time', tradeId: 'bad' }),
+          ],
+        })
       }
       return defaultRoute(url)
     }
 
-    const seconds = await new BitgetAdapter().fetchTrades(credentials, recentSince())
-    expect(seconds[0]?.traded_at).toBe(new Date(1710000000).toISOString())
-
-    handler = (url) => {
-      if (url.includes('/api/v2/spot/trade/fills')) {
-        return jsonResponse({ code: '00000', data: [spotFill({ cTime: 'not-a-time' })] })
-      }
-      return defaultRoute(url)
-    }
-
-    await expect(new BitgetAdapter().fetchTrades(credentials, recentSince())).rejects.toThrow(RangeError)
+    const trades = await new BitgetAdapter().fetchTrades(credentials, recentSince())
+    expect(trades.map((trade) => trade.external_trade_id)).toEqual(['seconds', 'millis'])
+    expect(trades[0]?.traded_at).toBe(new Date(1710000000 * 1000).toISOString())
+    expect(trades[1]?.traded_at).toBe(new Date(1710000000000).toISOString())
+    expect(JSON.stringify(trades)).not.toContain(new Date().toISOString().slice(0, 10))
   })
 
-  it('uses the absolute futures quantity and a zero price for a bad price', async () => {
+  it('drops a futures fill with a malformed price and keeps the venue quantity text', async () => {
     handler = (url) => {
       if (url.includes('/api/v2/mix/order/fill-history') && url.includes('productType=USDT-FUTURES') && url.includes('startTime=')) {
         return jsonResponse({
@@ -115,15 +116,41 @@ describe('BitgetAdapter', () => {
       return defaultRoute(url)
     }
 
+    const malformed = await new BitgetAdapter().fetchTrades(credentials, recentSince())
+    expect(malformed.find((trade) => trade.external_trade_id === 'fut-1')).toBeUndefined()
+
+    handler = (url) => {
+      if (url.includes('/api/v2/mix/order/fill-history') && url.includes('productType=USDT-FUTURES') && url.includes('startTime=')) {
+        return jsonResponse({
+          code: '00000',
+          data: {
+            fillList: [
+              {
+                tradeId: 'fut-2',
+                symbol: 'ETH_USDT',
+                side: 'sell',
+                size: '-1.5000',
+                price: '2400.10',
+                fee: '-0.2',
+                pnl: '4.5',
+                cTime: '1710000000000',
+              },
+            ],
+            endId: '',
+          },
+        })
+      }
+      return defaultRoute(url)
+    }
+
     const trades = await new BitgetAdapter().fetchTrades(credentials, recentSince())
-    const futures = trades.find((trade) => trade.external_trade_id === 'fut-1')
-    expect(futures).toMatchObject({
+    expect(trades.find((trade) => trade.external_trade_id === 'fut-2')).toMatchObject({
       symbol: 'ETHUSDT',
       side: 'sell',
-      quantity: 1.5,
-      price: 0,
-      fee: 0.2,
-      realized_pnl: 4.5,
+      quantity: '-1.5000',
+      price: '2400.10',
+      fee: '-0.2',
+      realized_pnl: '4.5',
       trade_type: 'futures',
     })
   })

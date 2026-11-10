@@ -14,10 +14,25 @@ import {
 } from './credentialValidation'
 
 import { BITGET_BASE_URL as BASE_URL } from './exchangeBases'
+import {
+  TradeRejectCounter,
+  addDecimals,
+  decimalOrZero,
+  optionalDecimal,
+  requiredDecimal,
+  type TradeRejectCounts,
+} from './tradeFields'
 const REQUEST_TIMEOUT = 10_000
 const DEFAULT_LOOKBACK_MS = 365 * 24 * 60 * 60 * 1000
 const BITGET_FUTURES_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 const BITGET_HISTORY_POSITION_LOOKBACK_MS = 90 * 24 * 60 * 60 * 1000
+
+function parseBitgetCTime(cTime: unknown): string | null {
+  if (typeof cTime !== 'string' || !/^\d+$/.test(cTime)) return null
+  if (cTime.length === 10) return new Date(Number(cTime) * 1000).toISOString()
+  if (cTime.length === 13) return new Date(Number(cTime)).toISOString()
+  return null
+}
 
 function sign(timestamp: string, method: string, requestPath: string, body: string, secret: string): string {
   const message = `${timestamp}${method.toUpperCase()}${requestPath}${body}`
@@ -49,6 +64,12 @@ async function fetchWithRetry(url: string, options?: RequestInit, attempt = 0): 
 }
 
 export class BitgetAdapter implements ExchangeAdapter {
+  private readonly rejections = new TradeRejectCounter()
+
+  rejectedTradeCounts(): TradeRejectCounts {
+    return this.rejections.counts
+  }
+
   private buildHeaders(
     credentials: ExchangeCredentials,
     method: string,
@@ -84,6 +105,7 @@ export class BitgetAdapter implements ExchangeAdapter {
   }
 
   async fetchTrades(credentials: ExchangeCredentials, since?: Date): Promise<ExchangeAdapterTrade[]> {
+    this.rejections.reset()
     const startTime = since ? since.getTime() : Date.now() - DEFAULT_LOOKBACK_MS
     const [spotTrades, futuresTrades] = await Promise.all([
       this.fetchSpotTrades(credentials, startTime),
@@ -146,7 +168,7 @@ export class BitgetAdapter implements ExchangeAdapter {
         const list = data.data ?? []
         if (list.length === 0) break
 
-        allTrades.push(...list.map((trade) => this.normalizeSpotTrade(trade)))
+        allTrades.push(...list.flatMap((trade) => this.accepted(this.normalizeSpotTrade(trade))))
 
         const nextCursor = list[list.length - 1]?.tradeId ?? ''
         if (!nextCursor || list.length < 100) break
@@ -203,7 +225,7 @@ export class BitgetAdapter implements ExchangeAdapter {
           const list = data.data ?? []
           if (list.length === 0) break
 
-          allTrades.push(...list.map((trade) => this.normalizeSpotTrade(trade)))
+          allTrades.push(...list.flatMap((trade) => this.accepted(this.normalizeSpotTrade(trade))))
 
           const nextCursor = list[list.length - 1]?.tradeId ?? ''
           if (!nextCursor || list.length < 100) break
@@ -265,7 +287,7 @@ export class BitgetAdapter implements ExchangeAdapter {
           const list = data.data?.fillList ?? []
           if (list.length === 0) break
 
-          allTrades.push(...list.map((trade) => this.normalizeFuturesTrade(trade)))
+          allTrades.push(...list.flatMap((trade) => this.accepted(this.normalizeFuturesTrade(trade))))
 
           const nextCursor = data.data?.endId ?? ''
           if (!nextCursor || list.length < 100) break
@@ -323,7 +345,7 @@ export class BitgetAdapter implements ExchangeAdapter {
         const list = data.data?.fillList ?? []
         if (list.length === 0) break
 
-        allTrades.push(...list.map((trade) => this.normalizeFuturesTrade(trade)))
+        allTrades.push(...list.flatMap((trade) => this.accepted(this.normalizeFuturesTrade(trade))))
 
         const nextCursor = data.data?.endId ?? ''
         if (!nextCursor || list.length < 100) break
@@ -398,50 +420,47 @@ export class BitgetAdapter implements ExchangeAdapter {
     return ''
   }
 
+  private accepted(trade: ExchangeAdapterTrade | null): ExchangeAdapterTrade[] {
+    return trade ? [trade] : []
+  }
+
   private normalizePositionHistoryTrade(position: BitgetHistoryPosition): ExchangeAdapterTrade | null {
     const symbol = (position.symbol ?? '').replace(/_/g, '')
     if (!symbol) return null
 
-    const openFee = parseFloat(position.openFee ?? '0')
-    const closeFee = parseFloat(position.closeFee ?? '0')
-    const fee = Math.abs((Number.isFinite(openFee) ? openFee : 0) + (Number.isFinite(closeFee) ? closeFee : 0))
-    const netProfit = parseFloat(position.netProfit ?? '')
-    const parsedPnl = Number.isFinite(netProfit) ? netProfit : parseFloat(position.pnl ?? '')
-    const pnl = Number.isFinite(parsedPnl) ? parsedPnl : null
-    if (pnl === null) return null
-
-    const parsedFunding = parseFloat(position.totalFunding ?? '0')
-    const fundingFee = Number.isFinite(parsedFunding) ? parsedFunding : 0
+    const openFee = decimalOrZero(position.openFee, this.rejections)
+    if (!openFee) return null
+    const closeFee = decimalOrZero(position.closeFee, this.rejections)
+    if (!closeFee) return null
+    const fee = addDecimals(openFee, closeFee)
+    if (!fee) return this.rejections.reject('INVALID_NUMBER')
+    const netProfit = optionalDecimal(position.netProfit, this.rejections)
+    if (netProfit === undefined) return null
+    const fallbackPnl = netProfit === null ? optionalDecimal(position.pnl, this.rejections) : netProfit
+    if (fallbackPnl === undefined || fallbackPnl === null) return null
+    const fundingFee = decimalOrZero(position.totalFunding, this.rejections)
+    if (!fundingFee) return null
     const side: 'buy' | 'sell' = (position.holdSide ?? '').toLowerCase() === 'short' ? 'buy' : 'sell'
-    const tradedAtRaw = parseInt(
-      position.uTime ?? position.utime ?? position.cTime ?? position.ctime ?? String(Date.now()),
-      10
-    )
-    const tradedAtTs = Number.isFinite(tradedAtRaw)
-      ? tradedAtRaw > 1_000_000_000_000
-        ? tradedAtRaw
-        : tradedAtRaw * 1000
-      : Date.now()
-    const tradedAt = new Date(tradedAtTs).toISOString()
+    const rawTime = position.uTime ?? position.utime ?? position.cTime ?? position.ctime
+    const tradedAt = parseBitgetCTime(rawTime)
+    if (!tradedAt) return this.rejections.reject('INVALID_TIMESTAMP')
 
     const tradeIdParts = [
       position.positionId ?? position.trackingNo ?? '',
       position.symbol ?? '',
-      position.uTime ?? position.utime ?? position.cTime ?? position.ctime ?? '',
+      rawTime ?? '',
     ].filter((part) => part.length > 0)
-    const externalTradeId =
-      tradeIdParts.join(':') ||
-      `futures_position_${position.uTime ?? position.utime ?? position.cTime ?? position.ctime ?? Date.now()}`
+    if (tradeIdParts.length === 0) return this.rejections.reject('MISSING_ID')
 
     return {
-      external_trade_id: externalTradeId,
+      external_trade_id: tradeIdParts.join(':'),
       symbol,
       side,
-      quantity: 0,
-      price: 0,
+      quantity: '0',
+      price: '0',
       fee,
       fee_currency: position.marginCoin ?? 'USDT',
-      realized_pnl: pnl,
+      realized_pnl: fallbackPnl,
       funding_fee: fundingFee,
       income_type: 'history_position',
       trade_type: 'futures',
@@ -529,43 +548,55 @@ export class BitgetAdapter implements ExchangeAdapter {
     return balances
   }
 
-  private normalizeSpotTrade(trade: BitgetSpotFill): ExchangeAdapterTrade {
+  private normalizeSpotTrade(trade: BitgetSpotFill): ExchangeAdapterTrade | null {
+    const tradedAt = parseBitgetCTime(trade.cTime)
+    if (!tradedAt) return this.rejections.reject('INVALID_TIMESTAMP')
+    const externalTradeId = String(trade.tradeId ?? '').trim()
+    if (!externalTradeId) return this.rejections.reject('MISSING_ID')
+    const quantity = requiredDecimal(trade.size, this.rejections)
+    if (!quantity) return null
+    const price = requiredDecimal(trade.priceAvg, this.rejections)
+    if (!price) return null
+    const fee = decimalOrZero(trade.feeDetail?.totalFee, this.rejections)
+    if (!fee) return null
     const side = (trade.side ?? '').toLowerCase() === 'sell' ? 'sell' : 'buy'
-    const fee = trade.feeDetail?.totalFee ? parseFloat(trade.feeDetail.totalFee) : 0
     return {
-      external_trade_id: trade.tradeId,
+      external_trade_id: externalTradeId,
       symbol: (trade.symbol ?? '').replace(/_/g, ''),
       side,
-      quantity: parseFloat(trade.size ?? '0'),
-      price: parseFloat(trade.priceAvg ?? '0'),
+      quantity,
+      price,
       fee,
       fee_currency: trade.feeDetail?.feeCoin ?? 'USDT',
       realized_pnl: null,
-      funding_fee: 0,
+      funding_fee: '0',
       income_type: null,
       trade_type: 'spot',
-      traded_at: new Date(parseInt(trade.cTime ?? String(Date.now()), 10)).toISOString(),
+      traded_at: tradedAt,
       raw_data: trade as unknown as Record<string, unknown>,
     }
   }
 
-  private normalizeFuturesTrade(trade: BitgetFuturesFill): ExchangeAdapterTrade {
-    const parsedFee = trade.fee ? Math.abs(parseFloat(trade.fee)) : 0
-    const fee = Number.isFinite(parsedFee) ? parsedFee : 0
-    const parsedPnl = trade.pnl ? parseFloat(trade.pnl) : null
-    const pnl = parsedPnl !== null && Number.isFinite(parsedPnl) ? parsedPnl : null
+  private normalizeFuturesTrade(trade: BitgetFuturesFill): ExchangeAdapterTrade | null {
+    const tradedAt = parseBitgetCTime(trade.cTime)
+    if (!tradedAt) return this.rejections.reject('INVALID_TIMESTAMP')
+    const externalTradeId = String(trade.tradeId ?? trade.orderId ?? '').trim()
+    if (!externalTradeId) return this.rejections.reject('MISSING_ID')
+    const fee = decimalOrZero(trade.fee, this.rejections)
+    if (!fee) return null
+    const pnl = optionalDecimal(trade.pnl, this.rejections)
+    if (pnl === undefined) return null
     const rawQuantity =
-      trade.size ?? trade.baseVolume ?? trade.fillQty ?? trade.fillSz ?? trade.qty ?? '0'
-    const rawPrice =
-      trade.price ?? trade.priceAvg ?? trade.fillPrice ?? trade.avgPrice ?? '0'
+      trade.size ?? trade.baseVolume ?? trade.fillQty ?? trade.fillSz ?? trade.qty
+    const rawPrice = trade.price ?? trade.priceAvg ?? trade.fillPrice ?? trade.avgPrice
+    const quantity = requiredDecimal(rawQuantity, this.rejections)
+    if (!quantity) return null
+    const price = requiredDecimal(rawPrice, this.rejections)
+    if (!price) return null
     const rawSide = trade.side ?? trade.tradeSide ?? 'buy'
-    const parsedQuantity = parseFloat(rawQuantity)
-    const parsedPrice = parseFloat(rawPrice)
-    const quantity = Number.isFinite(parsedQuantity) ? Math.abs(parsedQuantity) : 0
-    const price = Number.isFinite(parsedPrice) ? parsedPrice : 0
 
     return {
-      external_trade_id: trade.tradeId ?? trade.orderId ?? `futures_${trade.cTime ?? Date.now()}`,
+      external_trade_id: externalTradeId,
       symbol: (trade.symbol ?? '').replace(/_/g, ''),
       side: rawSide.toLowerCase() === 'sell' ? 'sell' : 'buy',
       quantity,
@@ -573,10 +604,10 @@ export class BitgetAdapter implements ExchangeAdapter {
       fee,
       fee_currency: trade.feeCoin ?? trade.marginCoin ?? 'USDT',
       realized_pnl: pnl,
-      funding_fee: 0,
+      funding_fee: '0',
       income_type: trade.tradeScope ?? 'fill_history',
       trade_type: 'futures',
-      traded_at: new Date(parseInt(trade.cTime ?? String(Date.now()), 10)).toISOString(),
+      traded_at: tradedAt,
       raw_data: trade as unknown as Record<string, unknown>,
     }
   }

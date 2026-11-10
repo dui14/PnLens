@@ -292,12 +292,12 @@ export type ExchangeAdapterTrade = {
   external_trade_id: string
   symbol: string
   side: 'buy' | 'sell'
-  quantity: number
-  price: number
-  fee: number
+  quantity: string
+  price: string
+  fee: string
   fee_currency: string
-  realized_pnl: number | null
-  funding_fee?: number
+  realized_pnl: string | null
+  funding_fee?: string
   income_type?: string | null
   trade_type: 'spot' | 'futures' | 'margin'
   traded_at: string

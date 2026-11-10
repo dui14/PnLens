@@ -62,18 +62,18 @@ describe('OKXAdapter', () => {
       external_trade_id: 'okx_fill_fill-1',
       symbol: 'BTCUSDT',
       side: 'sell',
-      quantity: 0.125,
-      price: 65000.12,
-      fee: 0.3,
+      quantity: '0.1250',
+      price: '65000.1200',
+      fee: '-0.30',
       fee_currency: 'USDT',
-      realized_pnl: 1.5,
+      realized_pnl: '1.5',
       trade_type: 'spot',
       traded_at: new Date(1710000000000).toISOString(),
     })
     expect(JSON.stringify(trades).includes(credentials.apiSecret)).toBe(false)
   })
 
-  it('scales swap quantity by the contract value and converts the symbol', async () => {
+  it('keeps the swap fill size and converts the symbol', async () => {
     handler = (url) => {
       if (url.includes('/api/v5/trade/fills-history') && url.includes('instType=SWAP')) {
         return jsonResponse({
@@ -96,27 +96,27 @@ describe('OKXAdapter', () => {
     const swap = trades.find((trade) => trade.external_trade_id === 'okx_fill_swap-1')
     expect(swap).toMatchObject({
       symbol: 'BTCUSDTSWAP',
-      quantity: 0.02,
+      quantity: '2',
       trade_type: 'futures',
     })
   })
 
-  it('uses the current time when the fill timestamp is not a number', async () => {
-    const before = Date.now()
+  it('drops a fill whose timestamp is not a number', async () => {
     handler = (url) => {
       if (url.includes('/api/v5/trade/fills-history') && url.includes('instType=SPOT')) {
-        return jsonResponse({ code: '0', data: [fill({ ts: 'not-a-time', tradeId: 'bad-ts' })] })
+        return jsonResponse({
+          code: '0',
+          data: [fill({ ts: 'not-a-time', tradeId: 'bad-ts' }), fill({ tradeId: 'fill-ok' })],
+        })
       }
       return defaultRoute(url)
     }
 
     const trades = await new OKXAdapter().fetchTrades(credentials, recentSince())
-    const tradedAtMs = new Date(trades[0]?.traded_at ?? '').getTime()
-    expect(tradedAtMs).toBeGreaterThanOrEqual(before)
-    expect(tradedAtMs).toBeLessThanOrEqual(Date.now() + 1000)
+    expect(trades.map((trade) => trade.external_trade_id)).toEqual(['okx_fill_fill-ok'])
   })
 
-  it('turns a non-numeric price into zero', async () => {
+  it('drops a fill with a malformed price', async () => {
     handler = (url) => {
       if (url.includes('/api/v5/trade/fills-history') && url.includes('instType=SPOT')) {
         return jsonResponse({ code: '0', data: [fill({ fillPx: 'not-a-price', fillPnl: '' })] })
@@ -125,8 +125,7 @@ describe('OKXAdapter', () => {
     }
 
     const trades = await new OKXAdapter().fetchTrades(credentials, recentSince())
-    expect(trades[0]?.price).toBe(0)
-    expect(trades[0]?.realized_pnl).toBeNull()
+    expect(trades).toEqual([])
   })
 
   it('returns no trades when every page is empty', async () => {

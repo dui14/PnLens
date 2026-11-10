@@ -78,9 +78,9 @@ describe('BybitAdapter', () => {
     expect(first).toMatchObject({
       symbol: 'BTCUSDT',
       side: 'buy',
-      quantity: 0.01,
-      price: 65000.125,
-      fee: 0.02,
+      quantity: '0.01000000',
+      price: '65000.125',
+      fee: '0.0200',
       fee_currency: 'USDT',
       realized_pnl: null,
       trade_type: 'spot',
@@ -90,22 +90,22 @@ describe('BybitAdapter', () => {
     expect(JSON.stringify(trades).includes(credentials.apiSecret)).toBe(false)
   })
 
-  it('uses the current time when execTime is not numeric', async () => {
-    const before = Date.now()
+  it('drops an execution whose execTime is not numeric', async () => {
     http.handler = (url) => {
       if (url.includes('/v5/execution/list') && url.includes('category=spot')) {
         return jsonResponse({
           retCode: 0,
-          result: { list: [execution({ execTime: 'not-a-time' })], nextPageCursor: '' },
+          result: {
+            list: [execution({ execTime: 'not-a-time' }), execution({ execId: 'exec-ok' })],
+            nextPageCursor: '',
+          },
         })
       }
       return defaultRoute(url)
     }
 
     const trades = await new BybitAdapter().fetchTrades(credentials, recentSince())
-    const tradedAtMs = new Date(trades[0]?.traded_at ?? '').getTime()
-    expect(tradedAtMs).toBeGreaterThanOrEqual(before)
-    expect(tradedAtMs).toBeLessThanOrEqual(Date.now() + 1000)
+    expect(trades.map((trade) => trade.external_trade_id)).toEqual(['exec-ok'])
   })
 
   it('maps a short position and skips a zero size', async () => {
@@ -186,7 +186,7 @@ describe('BybitAdapter', () => {
 
     const trades = await new BybitAdapter().fetchTrades(credentials, recentSince())
     expect(attempts).toBeGreaterThanOrEqual(2)
-    expect(trades[0]).toMatchObject({ external_trade_id: 'exec-1', realized_pnl: 1.25 })
+    expect(trades[0]).toMatchObject({ external_trade_id: 'exec-1', realized_pnl: '1.25' })
   })
 
   it('follows the next page cursor and keeps one copy of a duplicate exec id', async () => {

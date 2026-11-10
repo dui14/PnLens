@@ -14,6 +14,14 @@ import {
 } from './credentialValidation'
 
 import { GATEIO_BASE_URL as BASE_URL } from './exchangeBases'
+import {
+  TradeRejectCounter,
+  decimalOrZero,
+  flexibleTimeToIso,
+  optionalDecimal,
+  requiredDecimal,
+  type TradeRejectCounts,
+} from './tradeFields'
 const REQUEST_TIMEOUT = 10_000
 const DEFAULT_LOOKBACK_MS = 365 * 24 * 60 * 60 * 1000
 const GATE_MAX_WINDOW_SECONDS = 30 * 24 * 60 * 60
@@ -54,11 +62,8 @@ function normalizeSymbol(raw: string | undefined): string {
   return raw.replace(/[^A-Z0-9]/gi, '').toUpperCase()
 }
 
-function toIsoFromGateTimestamp(value: unknown): string {
-  const raw = typeof value === 'number' || typeof value === 'string' ? Number(value) : NaN
-  if (!Number.isFinite(raw)) return new Date().toISOString()
-  const millis = raw > 1_000_000_000_000 ? raw : raw * 1000
-  return new Date(millis).toISOString()
+function toIsoFromGateTimestamp(value: unknown): string | null {
+  return flexibleTimeToIso(value)
 }
 
 async function fetchWithTimeout(url: string, options?: RequestInit): Promise<Response> {
@@ -87,6 +92,11 @@ async function fetchWithRetry(url: string, options?: RequestInit, attempt = 0): 
 
 export class GateioAdapter implements ExchangeAdapter {
   private futuresContractSpecsBySettle = new Map<string, Map<string, GateFuturesContractSpec>>()
+  private readonly rejections = new TradeRejectCounter()
+
+  rejectedTradeCounts(): TradeRejectCounts {
+    return this.rejections.counts
+  }
 
   private buildHeaders(
     credentials: ExchangeCredentials,
@@ -134,6 +144,7 @@ export class GateioAdapter implements ExchangeAdapter {
   }
 
   async fetchTrades(credentials: ExchangeCredentials, since?: Date): Promise<ExchangeAdapterTrade[]> {
+    this.rejections.reset()
     const startMs = since ? since.getTime() : Date.now() - DEFAULT_LOOKBACK_MS
 
     const [spotTrades, futuresTrades, positionCloseEvents] = await Promise.all([
@@ -260,7 +271,7 @@ export class GateioAdapter implements ExchangeAdapter {
         const pageTrades = data as GateSpotTrade[]
         if (pageTrades.length === 0) break
 
-        allTrades.push(...pageTrades.map((trade) => this.normalizeSpotTrade(trade)))
+        allTrades.push(...pageTrades.flatMap((trade) => this.accepted(this.normalizeSpotTrade(trade))))
 
         if (pageTrades.length < 1000) break
         await sleep(60)
@@ -310,8 +321,8 @@ export class GateioAdapter implements ExchangeAdapter {
           if (pageTrades.length === 0) break
 
           allTrades.push(
-            ...pageTrades.map((trade) =>
-              this.normalizeFuturesTrade(trade, settle, futuresContractSpecs)
+            ...pageTrades.flatMap((trade) =>
+              this.accepted(this.normalizeFuturesTrade(trade, settle, futuresContractSpecs))
             )
           )
 
@@ -381,27 +392,56 @@ export class GateioAdapter implements ExchangeAdapter {
     return events
   }
 
-  private normalizeSpotTrade(trade: GateSpotTrade): ExchangeAdapterTrade {
-    const side = (trade.side ?? '').toLowerCase() === 'sell' ? 'sell' : 'buy'
-    const symbol = normalizeSymbol(trade.currency_pair)
-    const fee = Math.abs(asNumber(trade.fee))
-    const externalTradeId =
-      (typeof trade.id === 'string' && trade.id) ||
-      `spot_${trade.order_id ?? 'na'}_${trade.create_time_ms ?? trade.create_time ?? Date.now()}`
+  private accepted(trade: ExchangeAdapterTrade | null): ExchangeAdapterTrade[] {
+    return trade ? [trade] : []
+  }
 
+  private stableTradeId(
+    explicitId: unknown,
+    prefix: 'spot' | 'futures',
+    orderId: unknown,
+    timeValue: unknown
+  ): string | null {
+    if (typeof explicitId === 'string' && explicitId.trim()) return explicitId.trim()
+    if (typeof orderId === 'string' && orderId.trim() && (typeof timeValue === 'string' || typeof timeValue === 'number')) {
+      return `${prefix}_${orderId.trim()}_${timeValue}`
+    }
+    return null
+  }
+
+  private normalizeSpotTrade(trade: GateSpotTrade): ExchangeAdapterTrade | null {
+    const tradedAt = toIsoFromGateTimestamp(trade.create_time_ms ?? trade.create_time)
+    if (!tradedAt) return this.rejections.reject('INVALID_TIMESTAMP')
+    const externalTradeId = this.stableTradeId(
+      trade.id,
+      'spot',
+      trade.order_id,
+      trade.create_time_ms ?? trade.create_time
+    )
+    if (!externalTradeId) return this.rejections.reject('MISSING_ID')
+    const quantity = requiredDecimal(
+      typeof trade.amount === 'string' ? trade.amount : typeof trade.size === 'string' ? trade.size : null,
+      this.rejections
+    )
+    if (!quantity) return null
+    const price = requiredDecimal(typeof trade.price === 'string' ? trade.price : null, this.rejections)
+    if (!price) return null
+    const fee = decimalOrZero(typeof trade.fee === 'string' ? trade.fee : trade.fee === undefined ? undefined : null, this.rejections)
+    if (!fee) return null
+    const side = (trade.side ?? '').toLowerCase() === 'sell' ? 'sell' : 'buy'
     return {
       external_trade_id: externalTradeId,
-      symbol,
+      symbol: normalizeSymbol(trade.currency_pair),
       side,
-      quantity: Math.abs(asNumber(trade.amount ?? trade.size)),
-      price: asNumber(trade.price),
+      quantity,
+      price,
       fee,
       fee_currency: (trade.fee_currency ?? 'USDT').toUpperCase(),
       realized_pnl: null,
-      funding_fee: 0,
+      funding_fee: '0',
       income_type: null,
       trade_type: 'spot',
-      traded_at: toIsoFromGateTimestamp(trade.create_time_ms ?? trade.create_time),
+      traded_at: tradedAt,
       raw_data: trade as unknown as Record<string, unknown>,
     }
   }
@@ -409,29 +449,44 @@ export class GateioAdapter implements ExchangeAdapter {
   private normalizeFuturesTrade(
     trade: GateFuturesTrade,
     settle: string,
-    futuresContractSpecs: Map<string, GateFuturesContractSpec>
-  ): ExchangeAdapterTrade {
-    const rawSize = asNumber(trade.size ?? trade.qty)
-    const sideFromSize: 'buy' | 'sell' = rawSize < 0 ? 'sell' : 'buy'
+    _futuresContractSpecs: Map<string, GateFuturesContractSpec>
+  ): ExchangeAdapterTrade | null {
+    const tradedAt = toIsoFromGateTimestamp(trade.create_time_ms ?? trade.create_time)
+    if (!tradedAt) return this.rejections.reject('INVALID_TIMESTAMP')
+    const externalTradeId = this.stableTradeId(
+      trade.id,
+      'futures',
+      trade.order_id,
+      trade.create_time_ms ?? trade.create_time
+    )
+    if (!externalTradeId) return this.rejections.reject('MISSING_ID')
+    const quantity = requiredDecimal(
+      typeof trade.size === 'string' ? trade.size : typeof trade.qty === 'string' ? trade.qty : null,
+      this.rejections
+    )
+    if (!quantity) return null
+    const price = requiredDecimal(typeof trade.price === 'string' ? trade.price : null, this.rejections)
+    if (!price) return null
+    const fee = decimalOrZero(typeof trade.fee === 'string' ? trade.fee : undefined, this.rejections)
+    if (!fee) return null
+    const realizedPnl = optionalDecimal(typeof trade.pnl === 'string' ? trade.pnl : trade.pnl === undefined || trade.pnl === null ? null : undefined, this.rejections)
+    if (realizedPnl === undefined) return null
     const sideField = typeof trade.side === 'string' ? trade.side.toLowerCase() : ''
+    const sideFromSize: 'buy' | 'sell' = quantity.startsWith('-') && !/^-0(\.0+)?$/.test(quantity) ? 'sell' : 'buy'
     const side: 'buy' | 'sell' = sideField === 'sell' ? 'sell' : sideField === 'buy' ? 'buy' : sideFromSize
-    const externalTradeId =
-      (typeof trade.id === 'string' && trade.id) ||
-      `futures_${trade.order_id ?? 'na'}_${trade.create_time_ms ?? trade.create_time ?? Date.now()}`
-
     return {
       external_trade_id: externalTradeId,
       symbol: normalizeSymbol(trade.contract),
       side,
-      quantity: this.normalizeFuturesQuantity(rawSize, trade.contract, futuresContractSpecs),
-      price: asNumber(trade.price),
-      fee: Math.abs(asNumber(trade.fee)),
+      quantity,
+      price,
+      fee,
       fee_currency: (trade.fee_currency ?? settle ?? trade.settle ?? 'USDT').toUpperCase(),
-      realized_pnl: asNullableNumber(trade.pnl),
-      funding_fee: 0,
+      realized_pnl: realizedPnl,
+      funding_fee: '0',
       income_type: 'fill_history',
       trade_type: 'futures',
-      traded_at: toIsoFromGateTimestamp(trade.create_time_ms ?? trade.create_time),
+      traded_at: tradedAt,
       raw_data: trade as unknown as Record<string, unknown>,
     }
   }
@@ -505,37 +560,48 @@ export class GateioAdapter implements ExchangeAdapter {
   }
 
   private normalizePositionCloseEvent(trade: GatePositionClose): ExchangeAdapterTrade | null {
-    const pnl = asNullableNumber(trade.pnl ?? trade.close_pnl ?? trade.realized_pnl)
-    if (pnl === null) return null
+    const pnlSource = trade.pnl ?? trade.close_pnl ?? trade.realized_pnl
+    const pnl = optionalDecimal(typeof pnlSource === 'string' ? pnlSource : null, this.rejections)
+    if (pnl === undefined || pnl === null) return null
 
     const symbol = normalizeSymbol(trade.contract)
     if (!symbol) return null
 
     const sideField = typeof trade.side === 'string' ? trade.side.toLowerCase() : ''
-    const sideFromSize = asNumber(trade.size) < 0 ? 'sell' : 'buy'
+    const sizeText = typeof trade.size === 'string' ? trade.size : ''
+    const sideFromSize: 'buy' | 'sell' = sizeText.startsWith('-') && !/^-0(\.0+)?$/.test(sizeText) ? 'sell' : 'buy'
     const side: 'buy' | 'sell' = sideField === 'sell' ? 'sell' : sideField === 'buy' ? 'buy' : sideFromSize
 
     const eventTs = trade.close_time_ms ?? trade.time_ms ?? trade.close_time ?? trade.time
-    const fallbackIdPart = typeof eventTs === 'string' || typeof eventTs === 'number' ? String(eventTs) : String(Date.now())
+    const tradedAt = toIsoFromGateTimestamp(eventTs)
+    if (!tradedAt) return this.rejections.reject('INVALID_TIMESTAMP')
     const externalTradeId =
-      (typeof trade.id === 'string' && trade.id) ||
-      (typeof trade.order_id === 'string' && trade.order_id
-        ? `position_close_${trade.order_id}_${fallbackIdPart}`
-        : `position_close_${symbol}_${fallbackIdPart}`)
+      (typeof trade.id === 'string' && trade.id.trim()) ||
+      (typeof trade.order_id === 'string' && trade.order_id.trim()
+        ? `position_close_${trade.order_id.trim()}_${String(eventTs)}`
+        : '')
+    if (!externalTradeId) return this.rejections.reject('MISSING_ID')
+    const fee = decimalOrZero(typeof trade.fee === 'string' ? trade.fee : undefined, this.rejections)
+    if (!fee) return null
+    const fundingFee = decimalOrZero(
+      typeof trade.funding_fee === 'string' ? trade.funding_fee : undefined,
+      this.rejections
+    )
+    if (!fundingFee) return null
 
     return {
       external_trade_id: externalTradeId,
       symbol,
       side,
-      quantity: 0,
-      price: 0,
-      fee: Math.abs(asNumber(trade.fee)),
+      quantity: '0',
+      price: '0',
+      fee,
       fee_currency: (trade.fee_currency ?? trade.settle ?? 'USDT').toUpperCase(),
       realized_pnl: pnl,
-      funding_fee: asNumber(trade.funding_fee ?? 0),
+      funding_fee: fundingFee,
       income_type: 'position_close',
       trade_type: 'futures',
-      traded_at: toIsoFromGateTimestamp(eventTs),
+      traded_at: tradedAt,
       raw_data: trade as unknown as Record<string, unknown>,
     }
   }
