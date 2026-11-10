@@ -5,10 +5,13 @@ import type {
   AssetBalance,
   UnrealizedPosition,
 } from '@/lib/types'
+import { type ExchangeAdapter } from './exchangeFactory'
 import {
-  type ExchangeAdapter,
-  type CredentialValidationResult,
-} from './exchangeFactory'
+  interpretBinanceRestrictions,
+  probeFailure,
+  readJson,
+  type CredentialProbeResult,
+} from './credentialValidation'
 import { fetchExchange } from './httpClient'
 
 const BASE_URL = 'https://api.binance.com'
@@ -118,122 +121,22 @@ export class BinanceAdapter implements ExchangeAdapter {
     return fetchWithRetry(url, options, 0, this.proxy)
   }
 
-  async validateCredentials(credentials: ExchangeCredentials): Promise<boolean> {
-    const result = await this.validateCredentialsDetailed(credentials)
-    return result.ok
-  }
-
-  async validateCredentialsDetailed(
-    credentials: ExchangeCredentials
-  ): Promise<CredentialValidationResult> {
-    return this.withProxy(credentials, async () => {
-      try {
-        const restrictions = await this.fetchApiRestrictions(credentials)
-        if (restrictions.ok) {
-          return { ok: true, code: 'valid' }
-        }
-
-        const [spotResponse, futuresResponse] = await Promise.all([
-          this.fetchSignedAccount(credentials),
-          this.fetchSignedFuturesAccount(credentials),
-        ])
-
-        if (spotResponse.ok || futuresResponse.ok) {
-          return { ok: true, code: 'valid' }
-        }
-
-        const errors = await Promise.all([
-          this.parseBinanceError(spotResponse),
-          this.parseBinanceError(futuresResponse),
-        ])
-
-        return this.classifyBinanceValidationFailure(errors)
-      } catch {
-        return {
-          ok: false,
-          code: 'unreachable',
-          message: 'Binance validation request failed',
-        }
-      }
-    })
-  }
-
-  private classifyBinanceValidationFailure(
-    errors: Array<{ upstreamStatus: number; exchangeCode: number | null; message: string | null }>
-  ): CredentialValidationResult {
-    const regionBlocked = errors.find(
-      (error) =>
-        error.upstreamStatus === 451 ||
-        error.upstreamStatus === 403 ||
-        (error.message ?? '').toLowerCase().includes('restricted location')
-    )
-
-    if (regionBlocked) {
-      return {
-        ok: false,
-        code: 'region_blocked',
-        upstreamStatus: regionBlocked.upstreamStatus,
-        exchangeCode: regionBlocked.exchangeCode,
-        message: regionBlocked.message,
-      }
-    }
-
-    const timeDrift = errors.find((error) => error.exchangeCode === -1021)
-    if (timeDrift) {
-      return {
-        ok: false,
-        code: 'time_drift',
-        upstreamStatus: timeDrift.upstreamStatus,
-        exchangeCode: timeDrift.exchangeCode,
-        message: timeDrift.message,
-      }
-    }
-
-    const unreachable = errors.find((error) => error.upstreamStatus >= 500)
-    if (unreachable) {
-      return {
-        ok: false,
-        code: 'unreachable',
-        upstreamStatus: unreachable.upstreamStatus,
-        exchangeCode: unreachable.exchangeCode,
-        message: unreachable.message,
-      }
-    }
-
-    const first = errors[0] ?? {
-      upstreamStatus: 400,
-      exchangeCode: null,
-      message: null,
-    }
-
-    return {
-      ok: false,
-      code: 'invalid_api_key',
-      upstreamStatus: first.upstreamStatus,
-      exchangeCode: first.exchangeCode,
-      message: first.message,
-    }
-  }
-
-  private async parseBinanceError(response: Response): Promise<{
-    upstreamStatus: number
-    exchangeCode: number | null
-    message: string | null
-  }> {
-    const upstreamStatus = response.status
+  async validateCredentials(credentials: ExchangeCredentials): Promise<CredentialProbeResult> {
     try {
-      const payload = (await response.json()) as { code?: number; msg?: string }
-      return {
-        upstreamStatus,
-        exchangeCode: typeof payload.code === 'number' ? payload.code : null,
-        message: typeof payload.msg === 'string' ? payload.msg : null,
-      }
+      const params = new URLSearchParams({
+        timestamp: String(Date.now()),
+        recvWindow: String(RECV_WINDOW),
+      })
+      params.append('signature', sign(params.toString(), credentials.apiSecret))
+      const response = await fetchWithRetry(
+        `${BASE_URL}/sapi/v1/account/apiRestrictions?${params.toString()}`,
+        { headers: { 'X-MBX-APIKEY': credentials.apiKey } },
+        0,
+        null
+      )
+      return interpretBinanceRestrictions(response.status, await readJson(response))
     } catch {
-      return {
-        upstreamStatus,
-        exchangeCode: null,
-        message: null,
-      }
+      return probeFailure('EXCHANGE_UNREACHABLE')
     }
   }
 
@@ -261,32 +164,6 @@ export class BinanceAdapter implements ExchangeAdapter {
       } catch {
         return false
       }
-    })
-  }
-
-  private async fetchSignedAccount(credentials: ExchangeCredentials): Promise<Response> {
-    const timestamp = Date.now()
-    const params = new URLSearchParams({
-      timestamp: String(timestamp),
-      recvWindow: String(RECV_WINDOW),
-    })
-    params.append('signature', sign(params.toString(), credentials.apiSecret))
-
-    return this.fetchWithRetry(`${BASE_URL}/api/v3/account?${params.toString()}`, {
-      headers: { 'X-MBX-APIKEY': credentials.apiKey },
-    })
-  }
-
-  private async fetchSignedFuturesAccount(credentials: ExchangeCredentials): Promise<Response> {
-    const timestamp = Date.now()
-    const params = new URLSearchParams({
-      timestamp: String(timestamp),
-      recvWindow: String(RECV_WINDOW),
-    })
-    params.append('signature', sign(params.toString(), credentials.apiSecret))
-
-    return this.fetchWithRetry(`${FUTURES_URL}/fapi/v2/account?${params.toString()}`, {
-      headers: { 'X-MBX-APIKEY': credentials.apiKey },
     })
   }
 

@@ -5,10 +5,13 @@ import type {
   AssetBalance,
   UnrealizedPosition,
 } from '@/lib/types'
+import { type ExchangeAdapter } from './exchangeFactory'
 import {
-  type ExchangeAdapter,
-  type CredentialValidationResult,
-} from './exchangeFactory'
+  interpretBybitQueryApi,
+  probeFailure,
+  readJson,
+  type CredentialProbeResult,
+} from './credentialValidation'
 import { fetchExchange } from './httpClient'
 
 const BASE_URL = 'https://api.bybit.com'
@@ -100,133 +103,14 @@ export class BybitAdapter implements ExchangeAdapter {
     }
   }
 
-  async validateCredentials(credentials: ExchangeCredentials): Promise<boolean> {
-    const result = await this.validateCredentialsDetailed(credentials)
-    return result.ok
-  }
-
-  async validateCredentialsDetailed(
-    credentials: ExchangeCredentials
-  ): Promise<CredentialValidationResult> {
-    return this.withProxy(credentials, async () => {
-      try {
-        const queryApiResult = await this.verifyBybitEndpoint(credentials, '/v5/user/query-api')
-        if (queryApiResult.ok) {
-          return { ok: true, code: 'valid' }
-        }
-
-        const accountTypes: Array<'UNIFIED' | 'SPOT' | 'CONTRACT'> = ['UNIFIED', 'SPOT', 'CONTRACT']
-        for (const accountType of accountTypes) {
-          const queryString = `accountType=${encodeURIComponent(accountType)}`
-          const result = await this.verifyBybitEndpoint(
-            credentials,
-            `/v5/account/wallet-balance?${queryString}`,
-            queryString
-          )
-
-          if (result.ok) {
-            return { ok: true, code: 'valid' }
-          }
-
-          if (result.exchangeCode === 10020) {
-            continue
-          }
-
-          return this.classifyBybitValidationFailure(result)
-        }
-
-        return {
-          ok: false,
-          code: 'invalid_api_key',
-          upstreamStatus: queryApiResult.upstreamStatus,
-          exchangeCode: queryApiResult.exchangeCode,
-          message: queryApiResult.message,
-        }
-      } catch {
-        return {
-          ok: false,
-          code: 'unreachable',
-          message: 'Bybit validation request failed',
-        }
-      }
-    })
-  }
-
-  private async verifyBybitEndpoint(
-    credentials: ExchangeCredentials,
-    path: string,
-    queryString = ''
-  ): Promise<{
-    ok: boolean
-    upstreamStatus: number
-    exchangeCode: number | null
-    message: string | null
-  }> {
-    const headers = this.buildHeaders(credentials, queryString)
-    const response = await this.fetchWithRetry(`${BASE_URL}${path}`, { headers })
-
+  async validateCredentials(credentials: ExchangeCredentials): Promise<CredentialProbeResult> {
     try {
-      const data = (await response.json()) as { retCode?: number; retMsg?: string }
-      const exchangeCode = typeof data.retCode === 'number' ? data.retCode : null
-      const message = typeof data.retMsg === 'string' ? data.retMsg : null
-
-      return {
-        ok: response.ok && exchangeCode === 0,
-        upstreamStatus: response.status,
-        exchangeCode,
-        message,
-      }
+      const queryString = ''
+      const headers = this.buildHeaders(credentials, queryString)
+      const response = await fetchWithRetry(`${BASE_URL}/v5/user/query-api`, { headers }, 0, null)
+      return interpretBybitQueryApi(response.status, await readJson(response))
     } catch {
-      return {
-        ok: response.ok,
-        upstreamStatus: response.status,
-        exchangeCode: null,
-        message: null,
-      }
-    }
-  }
-
-  private classifyBybitValidationFailure(result: {
-    upstreamStatus: number
-    exchangeCode: number | null
-    message: string | null
-  }): CredentialValidationResult {
-    if (result.upstreamStatus === 403 || result.upstreamStatus === 451) {
-      return {
-        ok: false,
-        code: 'region_blocked',
-        upstreamStatus: result.upstreamStatus,
-        exchangeCode: result.exchangeCode,
-        message: result.message,
-      }
-    }
-
-    if (result.exchangeCode === 10002) {
-      return {
-        ok: false,
-        code: 'time_drift',
-        upstreamStatus: result.upstreamStatus,
-        exchangeCode: result.exchangeCode,
-        message: result.message,
-      }
-    }
-
-    if (result.upstreamStatus >= 500) {
-      return {
-        ok: false,
-        code: 'unreachable',
-        upstreamStatus: result.upstreamStatus,
-        exchangeCode: result.exchangeCode,
-        message: result.message,
-      }
-    }
-
-    return {
-      ok: false,
-      code: 'invalid_api_key',
-      upstreamStatus: result.upstreamStatus,
-      exchangeCode: result.exchangeCode,
-      message: result.message,
+      return probeFailure('EXCHANGE_UNREACHABLE')
     }
   }
 

@@ -505,6 +505,9 @@ function ConnectModal({
                     ? `Your ${selectedExchangeName} API keys have been updated successfully.`
                     : `Your ${selectedExchangeName} account has been successfully connected.`}
                 </p>
+                {submitError && (
+                  <p className="text-slate-500 dark:text-slate-400 text-sm max-w-sm mt-2">{submitError}</p>
+                )}
               </div>
             </div>
           )}
@@ -751,21 +754,38 @@ export function ExchangeIntegrationWizard(): React.JSX.Element {
           })
         }
         const data = await res.json()
+        const errorMessages: Record<string, string> = {
+          CONFLICT: 'This exchange is already connected.',
+          INVALID_KEY: 'That API key was rejected. Check the key and try again.',
+          INVALID_API_KEY: 'That API key was rejected. Check the key and try again.',
+          INVALID_SECRET_OR_PASSPHRASE: 'The secret or passphrase was rejected. Check both and try again.',
+          IP_NOT_WHITELISTED: 'The exchange rejected this server IP. Add the platform IP to the key allowlist.',
+          TRADE_PERMISSION_DETECTED: 'This key can trade. Create a read-only key and try again.',
+          WITHDRAW_PERMISSION_DETECTED: 'This key can withdraw. Create a read-only key with withdrawal disabled.',
+          TRANSFER_PERMISSION_DETECTED: 'This key can transfer funds. Create a read-only key with transfers disabled.',
+          GEO_BLOCKED: 'The exchange blocked this server region. Try again later.',
+          EXCHANGE_REGION_BLOCKED: 'The exchange blocked this server region. Try again later.',
+          RATE_LIMITED: 'Too many validation attempts. Wait and try again.',
+          EXCHANGE_UNREACHABLE: 'The exchange could not be reached. Try again in a few minutes.',
+          EXCHANGE_TIME_DRIFT: 'Server time is out of sync with the exchange. Try again in a moment.',
+          PASSPHRASE_REQUIRED: 'Passphrase is required for this exchange.',
+          UNKNOWN: 'The exchange could not validate this key. Try again.',
+          UNSUPPORTED_EXCHANGE: 'This exchange is not supported.',
+          VALIDATION_ERROR: 'Please check your input and try again.',
+          PERMISSIONS_UNVERIFIED: 'The key was saved. The exchange did not confirm that it is read-only.',
+          IP_RESTRICT_DISABLED: 'The key was saved. It is not restricted to an IP allowlist.',
+          IP_WHITELIST_MISSING: 'The key was saved. No IP allowlist was reported for this key.',
+        }
         if (data.success) {
           await fetchAccounts()
+          const warnings = Array.isArray(data.warnings) ? data.warnings : []
+          const warningText = warnings
+            .map((code: string) => errorMessages[code])
+            .filter((message: string | undefined) => Boolean(message))
+            .join(' ')
+          setSubmitError(warningText || null)
           setStep(3)
         } else {
-          const errorMessages: Record<string, string> = {
-            CONFLICT: 'This exchange is already connected.',
-            INVALID_API_KEY: 'Invalid API key or secret. Please check your credentials.',
-            EXCHANGE_REGION_BLOCKED: 'Exchange rejected this server IP/region. Please update exchange IP whitelist or change server region.',
-            EXCHANGE_UNREACHABLE: 'Exchange is temporarily unreachable from server. Please retry in a few minutes.',
-            EXCHANGE_TIME_DRIFT: 'Server time is out of sync with exchange time. Please retry in a moment.',
-            PASSPHRASE_REQUIRED: 'Passphrase is required for this exchange.',
-            WITHDRAW_PERMISSION_DETECTED: 'Please use read-only API keys without withdrawal permission.',
-            UNSUPPORTED_EXCHANGE: 'This exchange is not supported.',
-            VALIDATION_ERROR: 'Please check your input and try again.',
-          }
           setSubmitError(errorMessages[data.error] ?? 'Connection failed. Please try again.')
         }
       } catch {

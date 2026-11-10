@@ -23,17 +23,10 @@ import {
 } from '@/lib/db/exchangeDb'
 import { deleteExchangeTrackingData, upsertTrades } from '@/lib/db/tradesDb'
 import { encrypt, decrypt } from '@/lib/adapters/encryption'
-import {
-  createExchangeAdapter,
-  type ExchangeAdapter,
-  type CredentialValidationResult,
-} from '@/lib/adapters/exchangeFactory'
+import { createExchangeAdapter, type ExchangeAdapter } from '@/lib/adapters/exchangeFactory'
+import type { CredentialProbeResult } from '@/lib/adapters/credentialValidation'
 
-type ExchangeCredentialError =
-  | 'INVALID_API_KEY'
-  | 'EXCHANGE_REGION_BLOCKED'
-  | 'EXCHANGE_UNREACHABLE'
-  | 'EXCHANGE_TIME_DRIFT'
+const STORED_WARNINGS = ['PERMISSIONS_UNVERIFIED', 'IP_RESTRICT_DISABLED', 'IP_WHITELIST_MISSING'] as const
 
 function getSyncLookbackDate(): Date {
   const lookback = new Date()
@@ -41,34 +34,41 @@ function getSyncLookbackDate(): Date {
   return lookback
 }
 
-function mapValidationCodeToError(code: CredentialValidationResult['code']): ExchangeCredentialError {
-  if (code === 'region_blocked') return 'EXCHANGE_REGION_BLOCKED'
-  if (code === 'unreachable') return 'EXCHANGE_UNREACHABLE'
-  if (code === 'time_drift') return 'EXCHANGE_TIME_DRIFT'
+function mapProbeErrorForSync(code: string): string {
+  if (code === 'GEO_BLOCKED') return 'EXCHANGE_REGION_BLOCKED'
+  if (code === 'EXCHANGE_TIME_DRIFT') return 'EXCHANGE_TIME_DRIFT'
+  if (code === 'EXCHANGE_UNREACHABLE' || code === 'RATE_LIMITED' || code === 'UNKNOWN') {
+    return 'EXCHANGE_UNREACHABLE'
+  }
+  if (
+    code === 'TRADE_PERMISSION_DETECTED' ||
+    code === 'WITHDRAW_PERMISSION_DETECTED' ||
+    code === 'TRANSFER_PERMISSION_DETECTED'
+  ) {
+    return 'INVALID_API_KEY'
+  }
   return 'INVALID_API_KEY'
+}
+
+function storedWarnings(probe: CredentialProbeResult): string[] {
+  return probe.warnings.filter((warning) =>
+    (STORED_WARNINGS as readonly string[]).includes(warning)
+  )
 }
 
 async function validateCredentialsForAdapter(
   adapter: ExchangeAdapter,
   credentials: ExchangeCredentials
-): Promise<Result<true, ExchangeCredentialError>> {
+): Promise<Result<CredentialProbeResult, string>> {
   try {
-    if (typeof adapter.validateCredentialsDetailed === 'function') {
-      const detailed = await adapter.validateCredentialsDetailed(credentials)
-      if (detailed.ok) {
-        return { success: true, data: true }
-      }
-
-      return { success: false, error: mapValidationCodeToError(detailed.code) }
+    const probe = await adapter.validateCredentials(credentials)
+    if (!probe.ok) {
+      console.error('[exchangeService] credential validation failed:', probe.code)
+      return { success: false, error: probe.code }
     }
-
-    const isValid = await adapter.validateCredentials(credentials)
-    if (!isValid) {
-      return { success: false, error: 'INVALID_API_KEY' }
-    }
-
-    return { success: true, data: true }
+    return { success: true, data: probe }
   } catch {
+    console.error('[exchangeService] credential validation failed:', 'EXCHANGE_UNREACHABLE')
     return { success: false, error: 'EXCHANGE_UNREACHABLE' }
   }
 }
@@ -82,7 +82,8 @@ export async function connectExchange(
   passphrase?: string,
   label?: string,
   proxy?: string
-): Promise<Result<ExchangeAccount>> {
+): Promise<Result<{ account: ExchangeAccount; warnings: string[] }>> {
+  void proxy
   if ((exchange === 'okx' || exchange === 'bitget') && !passphrase) {
     return { success: false, error: 'PASSPHRASE_REQUIRED' }
   }
@@ -103,7 +104,6 @@ export async function connectExchange(
     apiKey,
     apiSecret,
     passphrase,
-    proxy,
   }
 
   const validation = await validateCredentialsForAdapter(adapter, credentials)
@@ -111,15 +111,9 @@ export async function connectExchange(
     return { success: false, error: validation.error }
   }
 
-  const hasWithdrawPermission = await adapter.hasWithdrawPermission(credentials)
-  if (hasWithdrawPermission) {
-    return { success: false, error: 'WITHDRAW_PERMISSION_DETECTED' }
-  }
-
   const encryptedKey = encrypt(apiKey)
   const encryptedSecret = encrypt(apiSecret)
   const encryptedPassphrase = passphrase ? encrypt(passphrase) : null
-  const encryptedProxy = proxy ? encrypt(proxy) : null
 
   const account = await createExchangeAccount(supabase, userId, exchange, label ?? null)
   if (!account) {
@@ -128,23 +122,35 @@ export async function connectExchange(
 
   const serviceSupabase = (await import('@/lib/db/supabase-server')).createSupabaseServiceClient()
 
-  const keyCreated = await createApiKey(
-    serviceSupabase,
-    account.id,
-    encryptedKey.encrypted,
-    encryptedSecret.encrypted,
-    encryptedKey.iv,
-    encryptedSecret.iv,
-    encryptedPassphrase?.encrypted ?? null,
-    encryptedPassphrase?.iv ?? null,
-    encryptedProxy?.encrypted ?? null,
-    encryptedProxy?.iv ?? null
-  )
-  if (!keyCreated) {
-    return { success: false, error: 'INTERNAL_ERROR' }
+  try {
+    const keyCreated = await createApiKey(
+      serviceSupabase,
+      account.id,
+      encryptedKey.encrypted,
+      encryptedSecret.encrypted,
+      encryptedKey.iv,
+      encryptedSecret.iv,
+      encryptedPassphrase?.encrypted ?? null,
+      encryptedPassphrase?.iv ?? null,
+      null,
+      null
+    )
+    if (!keyCreated) {
+      await deleteExchangeAccount(supabase, account.id, userId)
+      return { success: false, error: 'INTERNAL_ERROR' }
+    }
+  } catch (error) {
+    await deleteExchangeAccount(supabase, account.id, userId)
+    throw error
   }
 
-  return { success: true, data: account }
+  return {
+    success: true,
+    data: {
+      account,
+      warnings: storedWarnings(validation.data),
+    },
+  }
 }
 
 export async function listExchangeAccounts(
@@ -187,8 +193,9 @@ export async function syncExchangeAccount(
   const adapter = await createExchangeAdapter(account.exchange)
   const validation = await validateCredentialsForAdapter(adapter, credentials)
   if (!validation.success) {
-    await updateSyncStatus(supabase, exchangeAccountId, 'error', validation.error)
-    return { success: false, error: validation.error }
+    const syncError = mapProbeErrorForSync(validation.error)
+    await updateSyncStatus(supabase, exchangeAccountId, 'error', syncError)
+    return { success: false, error: syncError }
   }
 
   const since = getSyncLookbackDate()
@@ -325,11 +332,6 @@ export async function updateExchangeApiKeys(
   const validation = await validateCredentialsForAdapter(adapter, credentials)
   if (!validation.success) {
     return { success: false, error: validation.error }
-  }
-
-  const hasWithdrawPermission = await adapter.hasWithdrawPermission(credentials)
-  if (hasWithdrawPermission) {
-    return { success: false, error: 'WITHDRAW_PERMISSION_DETECTED' }
   }
 
   const encryptedKey = encrypt(apiKey)

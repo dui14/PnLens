@@ -6,6 +6,12 @@ import type {
   UnrealizedPosition,
 } from '@/lib/types'
 import type { ExchangeAdapter } from './exchangeFactory'
+import {
+  interpretGateAccountDetail,
+  probeFailure,
+  readJson,
+  type CredentialProbeResult,
+} from './credentialValidation'
 
 const BASE_URL = 'https://api.gateio.ws/api/v4'
 const REQUEST_TIMEOUT = 10_000
@@ -108,21 +114,18 @@ export class GateioAdapter implements ExchangeAdapter {
     }
   }
 
-  async validateCredentials(credentials: ExchangeCredentials): Promise<boolean> {
+  async validateCredentials(credentials: ExchangeCredentials): Promise<CredentialProbeResult> {
     try {
-      const requestPath = '/spot/accounts'
-      const queryString = 'currency=USDT'
-      const headers = this.buildHeaders(credentials, 'GET', requestPath, queryString)
-      const response = await fetchWithRetry(`${BASE_URL}${requestPath}?${queryString}`, {
+      const requestPath = '/account/detail'
+      const probePath = '/api/v4/account/detail'
+      const headers = this.buildHeaders(credentials, 'GET', requestPath)
+      const response = await fetchWithRetry(`https://api.gateio.ws${probePath}`, {
         method: 'GET',
         headers,
       })
-
-      if (!response.ok) return false
-      const data = (await response.json()) as unknown
-      return Array.isArray(data)
+      return interpretGateAccountDetail(response.status, await readJson(response))
     } catch {
-      return false
+      return probeFailure('EXCHANGE_UNREACHABLE')
     }
   }
 

@@ -6,6 +6,12 @@ import type {
   UnrealizedPosition,
 } from '@/lib/types'
 import type { ExchangeAdapter } from './exchangeFactory'
+import {
+  interpretBitgetApiKeyInfo,
+  probeFailure,
+  readJson,
+  type CredentialProbeResult,
+} from './credentialValidation'
 
 const BASE_URL = 'https://api.bitget.com'
 const REQUEST_TIMEOUT = 10_000
@@ -60,17 +66,15 @@ export class BitgetAdapter implements ExchangeAdapter {
     }
   }
 
-  async validateCredentials(credentials: ExchangeCredentials): Promise<boolean> {
+  async validateCredentials(credentials: ExchangeCredentials): Promise<CredentialProbeResult> {
     try {
-      if (!credentials.passphrase) return false
-      const path = '/api/v2/spot/account/assets'
+      if (!credentials.passphrase) return probeFailure('INVALID_SECRET_OR_PASSPHRASE')
+      const path = '/api/v2/user/apikey-info'
       const headers = this.buildHeaders(credentials, 'GET', path)
       const response = await fetchWithRetry(`${BASE_URL}${path}`, { headers })
-      if (!response.ok) return false
-      const data = (await response.json()) as { code: string }
-      return data.code === '00000'
+      return interpretBitgetApiKeyInfo(response.status, await readJson(response))
     } catch {
-      return false
+      return probeFailure('EXCHANGE_UNREACHABLE')
     }
   }
 

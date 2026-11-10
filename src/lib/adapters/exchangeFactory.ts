@@ -4,27 +4,10 @@ import type {
   AssetBalance,
   UnrealizedPosition,
 } from '@/lib/types'
-
-export type CredentialValidationCode =
-  | 'valid'
-  | 'invalid_api_key'
-  | 'region_blocked'
-  | 'unreachable'
-  | 'time_drift'
-
-export type CredentialValidationResult = {
-  ok: boolean
-  code: CredentialValidationCode
-  upstreamStatus?: number | null
-  exchangeCode?: number | string | null
-  message?: string | null
-}
+import type { CredentialProbeResult } from './credentialValidation'
 
 export interface ExchangeAdapter {
-  validateCredentials(credentials: ExchangeCredentials): Promise<boolean>
-  validateCredentialsDetailed?(
-    credentials: ExchangeCredentials
-  ): Promise<CredentialValidationResult>
+  validateCredentials(credentials: ExchangeCredentials): Promise<CredentialProbeResult>
   hasWithdrawPermission(credentials: ExchangeCredentials): Promise<boolean>
   fetchTrades(
     credentials: ExchangeCredentials,

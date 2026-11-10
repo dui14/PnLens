@@ -6,6 +6,12 @@ import type {
 } from '@/lib/types'
 import { buildOkxSignedHeaders } from '@/lib/adapters/okxApi'
 import type { ExchangeAdapter } from './exchangeFactory'
+import {
+  interpretOkxConfig,
+  probeFailure,
+  readJson,
+  type CredentialProbeResult,
+} from './credentialValidation'
 
 const BASE_URL = 'https://www.okx.com'
 const REQUEST_TIMEOUT = 10_000
@@ -56,17 +62,15 @@ export class OKXAdapter implements ExchangeAdapter {
     })
   }
 
-  async validateCredentials(credentials: ExchangeCredentials): Promise<boolean> {
+  async validateCredentials(credentials: ExchangeCredentials): Promise<CredentialProbeResult> {
     try {
-      if (!credentials.passphrase) return false
-      const path = '/api/v5/account/balance'
+      if (!credentials.passphrase) return probeFailure('INVALID_SECRET_OR_PASSPHRASE')
+      const path = '/api/v5/account/config'
       const headers = this.buildHeaders(credentials, 'GET', path)
       const response = await fetchWithRetry(`${BASE_URL}${path}`, { headers })
-      if (!response.ok) return false
-      const data = (await response.json()) as { code: string }
-      return data.code === '0'
+      return interpretOkxConfig(response.status, await readJson(response))
     } catch {
-      return false
+      return probeFailure('EXCHANGE_UNREACHABLE')
     }
   }
 
