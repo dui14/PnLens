@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createSupabaseServerClient } from '@/lib/db/supabase-server'
 import { removeExchangeAccount, toggleExchangeActive, updateExchangeApiKeys } from '@/lib/services/exchangeService'
 import { UpdateExchangeActiveSchema, UpdateExchangeKeysSchema } from '@/lib/validators/exchange'
+import { consumeValidationAttempt } from '@/lib/security/validationAttemptLimit'
 
 async function getAuthenticatedUser(supabase: Awaited<ReturnType<typeof createSupabaseServerClient>>) {
   const { data: { user } } = await supabase.auth.getUser()
@@ -115,7 +116,15 @@ export async function PUT(
   }
 
   const { id } = await params
-  const { apiKey, apiSecret, passphrase, label, proxy } = parsed.data
+  const { apiKey, apiSecret, passphrase, label } = parsed.data
+
+  if (!consumeValidationAttempt(user.id)) {
+    return NextResponse.json(
+      { success: false, data: null, error: 'RATE_LIMITED' },
+      { status: 429 }
+    )
+  }
+
   const result = await updateExchangeApiKeys(
     supabase,
     user.id,
@@ -123,8 +132,7 @@ export async function PUT(
     apiKey,
     apiSecret,
     passphrase,
-    label === undefined ? undefined : (label ?? undefined),
-    proxy
+    label === undefined ? undefined : (label ?? undefined)
   )
 
   if (!result.success) {
@@ -153,5 +161,10 @@ export async function PUT(
     )
   }
 
-  return NextResponse.json({ success: true, data: result.data, error: null })
+  return NextResponse.json({
+    success: true,
+    data: result.data.account,
+    warnings: result.data.warnings,
+    error: null,
+  })
 }

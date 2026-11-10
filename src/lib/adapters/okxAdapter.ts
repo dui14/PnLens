@@ -13,7 +13,7 @@ import {
   type CredentialProbeResult,
 } from './credentialValidation'
 
-const BASE_URL = 'https://www.okx.com'
+import { OKX_BASE_URL as BASE_URL } from './exchangeBases'
 const REQUEST_TIMEOUT = 10_000
 const DEFAULT_LOOKBACK_MS = 365 * 24 * 60 * 60 * 1000
 const OKX_HISTORY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000

@@ -14,7 +14,7 @@ import {
 } from './credentialValidation'
 import { fetchExchange } from './httpClient'
 
-const BASE_URL = 'https://api.bybit.com'
+import { BYBIT_BASE_URL as BASE_URL } from './exchangeBases'
 const REQUEST_TIMEOUT = 10_000
 const RECV_WINDOW = '5000'
 const DEFAULT_LOOKBACK_MS = 365 * 24 * 60 * 60 * 1000
@@ -72,19 +72,10 @@ export class BybitAdapter implements ExchangeAdapter {
   private proxy: string | null = null
 
   private async withProxy<T>(
-    credentials: ExchangeCredentials,
+    _credentials: ExchangeCredentials,
     fn: () => Promise<T>
   ): Promise<T> {
-    const previousProxy = this.proxy
-    if (typeof credentials.proxy === 'string') {
-      this.proxy = credentials.proxy.trim() || null
-    }
-
-    try {
-      return await fn()
-    } finally {
-      this.proxy = previousProxy
-    }
+    return fn()
   }
 
   private async fetchWithRetry(url: string, options?: RequestInit): Promise<Response> {

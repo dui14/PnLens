@@ -1,0 +1,6 @@
+export const BINANCE_BASE_URL = 'https://api.binance.com'
+export const BINANCE_FUTURES_BASE_URL = 'https://fapi.binance.com'
+export const OKX_BASE_URL = 'https://www.okx.com'
+export const BYBIT_BASE_URL = 'https://api.bybit.com'
+export const BITGET_BASE_URL = 'https://api.bitget.com'
+export const GATEIO_BASE_URL = 'https://api.gateio.ws/api/v4'

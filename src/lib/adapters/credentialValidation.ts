@@ -22,8 +22,7 @@ export type CredentialProbeResult = {
   warnings: string[]
 }
 
-const WRITE_FLAGS = ['spot.write', 'futures.write', 'withdraw.write', 'transfer.write'] as const
-const GATE_FLAG_NAMES = [...WRITE_FLAGS, 'read_only'] as const
+const GATE_FLAG_NAMES = ['spot.write', 'futures.write', 'withdraw.write', 'transfer.write', 'read_only'] as const
 
 export function probeOk(permissions: string[], warnings: string[] = []): CredentialProbeResult {
   return { ok: true, code: 'OK', permissions, warnings }
@@ -104,32 +103,30 @@ export function interpretBinanceRestrictions(status: number, body: unknown): Cre
     return probeFailure('UNKNOWN')
   }
 
-  const fields = [
-    'enableReading',
-    'enableSpotAndMarginTrading',
-    'enableWithdrawals',
-    'enableInternalTransfer',
-    'permitsUniversalTransfer',
-  ]
-  const present = fields.filter((field) => typeof record?.[field] === 'boolean')
-  if (!record || present.length === 0) return probeOk([], ['PERMISSIONS_UNVERIFIED'])
-
-  const permissions = present.filter((field) => record[field] === true)
-  if (record.enableWithdrawals === true) {
-    return probeFailure('WITHDRAW_PERMISSION_DETECTED', permissions)
-  }
-  if (record.enableInternalTransfer === true || record.permitsUniversalTransfer === true) {
-    return probeFailure('TRANSFER_PERMISSION_DETECTED', permissions)
-  }
-  if (record.enableSpotAndMarginTrading === true) {
-    return probeFailure('TRADE_PERMISSION_DETECTED', permissions)
-  }
-  if (record.enableReading === false) return probeFailure('INVALID_KEY', permissions)
-
   const warnings: string[] = []
-  if (record.ipRestrict === false) warnings.push('IP_RESTRICT_DISABLED')
-  if (present.length < fields.length) warnings.push('PERMISSIONS_UNVERIFIED')
-  return probeOk(permissions, warnings)
+  if (record?.enableFutures === true) warnings.push('FUTURES_PERMISSION_PRESENT')
+  if (record?.ipRestrict === false) warnings.push('IP_RESTRICT_DISABLED')
+
+  if (record?.enableWithdrawals === true) {
+    return probeFailure('WITHDRAW_PERMISSION_DETECTED', ['enableWithdrawals'])
+  }
+  if (record?.enableInternalTransfer === true || record?.permitsUniversalTransfer === true) {
+    return probeFailure('TRANSFER_PERMISSION_DETECTED', ['transfer'])
+  }
+  if (record?.enableSpotAndMarginTrading === true) {
+    return probeFailure('TRADE_PERMISSION_DETECTED', ['enableSpotAndMarginTrading'])
+  }
+  if (record?.enableReading === false) return probeFailure('INVALID_KEY', ['enableReading'])
+
+  const readOnly =
+    record?.enableReading === true &&
+    record.enableSpotAndMarginTrading === false &&
+    record.enableWithdrawals === false &&
+    record.enableInternalTransfer === false &&
+    record.permitsUniversalTransfer === false
+
+  if (!readOnly) return probeOk([], ['PERMISSIONS_UNVERIFIED', ...warnings])
+  return probeOk(['enableReading'], warnings)
 }
 
 export function interpretOkxConfig(status: number, body: unknown): CredentialProbeResult {
@@ -159,15 +156,16 @@ export function interpretOkxConfig(status: number, body: unknown): CredentialPro
   const row = Array.isArray(record?.data) ? asRecord(record.data[0]) : null
   if (!row || typeof row.perm !== 'string') return probeOk([], ['PERMISSIONS_UNVERIFIED'])
 
-  const permissions = row.perm
+  const perm = row.perm.trim()
+  const permissions = perm
     .split(',')
     .map((token) => token.trim())
     .filter((token) => token.length > 0)
 
   if (permissions.includes('withdraw')) return probeFailure('WITHDRAW_PERMISSION_DETECTED', permissions)
   if (permissions.includes('trade')) return probeFailure('TRADE_PERMISSION_DETECTED', permissions)
-  if (!permissions.includes('read_only')) return probeFailure('INVALID_KEY', permissions)
-  return probeOk(permissions, [])
+  if (perm === 'read_only') return probeOk(['read_only'], [])
+  return probeOk(permissions, ['PERMISSIONS_UNVERIFIED'])
 }
 
 function collectStrings(value: unknown, out: string[]): void {
@@ -221,12 +219,9 @@ export function interpretBybitQueryApi(status: number, body: unknown): Credentia
     return probeFailure('WITHDRAW_PERMISSION_DETECTED', permissionStrings)
   }
   if (readOnly === false) return probeFailure('TRADE_PERMISSION_DETECTED', ['readOnly'])
-  if (!result || readOnly === null) return probeOk([], ['PERMISSIONS_UNVERIFIED'])
+  if (!result || readOnly !== true) return probeOk([], ['PERMISSIONS_UNVERIFIED'])
 
   const warnings: string[] = []
-  if (result.permissions !== undefined && result.permissions !== null) {
-    warnings.push('PERMISSIONS_UNVERIFIED')
-  }
   const ips = result.ips
   const ipsMissing = ips === undefined || ips === null || ips === '' || (Array.isArray(ips) && ips.length === 0)
   if (ipsMissing) warnings.push('IP_WHITELIST_MISSING')
@@ -259,34 +254,24 @@ export function interpretBitgetApiKeyInfo(status: number, body: unknown): Creden
     ? data.authorities.filter((token): token is string => typeof token === 'string')
     : null
   const keyStatus = typeof data?.status === 'string' ? data.status : null
-  if (!data || !authorities || !keyStatus) return probeOk([], ['PERMISSIONS_UNVERIFIED'])
-  if (keyStatus !== 'normal') return probeFailure('INVALID_KEY', authorities)
+  if (!data || !authorities) return probeOk([], ['PERMISSIONS_UNVERIFIED'])
 
   const normalized = authorities.map((token) => token.toLowerCase())
-  if (!normalized.includes('readonly')) return probeFailure('INVALID_KEY', authorities)
   if (normalized.includes('withdraw')) return probeFailure('WITHDRAW_PERMISSION_DETECTED', authorities)
   if (normalized.includes('trade')) return probeFailure('TRADE_PERMISSION_DETECTED', authorities)
   if (normalized.includes('transfer')) return probeFailure('TRANSFER_PERMISSION_DETECTED', authorities)
+  if (!keyStatus) return probeOk(authorities, ['PERMISSIONS_UNVERIFIED'])
+  if (keyStatus !== 'normal') return probeFailure('INVALID_KEY', authorities)
 
-  const warnings = normalized.some((token) => token !== 'readonly') ? ['PERMISSIONS_UNVERIFIED'] : []
+  const exactReadOnly = normalized.length === 1 && normalized[0] === 'readonly'
+  const warnings = exactReadOnly ? [] : ['PERMISSIONS_UNVERIFIED']
   if (!Array.isArray(data.ipList) || data.ipList.length === 0) warnings.push('IP_RESTRICT_DISABLED')
-  return probeOk(authorities, warnings)
+  return probeOk(exactReadOnly ? ['readonly'] : authorities, warnings)
 }
 
-function collectGateFlags(value: unknown, found: Map<string, boolean>): void {
-  if (Array.isArray(value)) {
-    for (const item of value) collectGateFlags(item, found)
-    return
-  }
-  const record = asRecord(value)
-  if (!record) return
-  for (const [key, child] of Object.entries(record)) {
-    if ((GATE_FLAG_NAMES as readonly string[]).includes(key) && typeof child === 'boolean') {
-      found.set(key, child)
-      continue
-    }
-    if (child && typeof child === 'object') collectGateFlags(child, found)
-  }
+function topLevelFlag(record: Record<string, unknown> | null, name: string): boolean | null {
+  if (!record || typeof record[name] !== 'boolean') return null
+  return record[name]
 }
 
 export function interpretGateAccountDetail(status: number, body: unknown): CredentialProbeResult {
@@ -306,18 +291,25 @@ export function interpretGateAccountDetail(status: number, body: unknown): Crede
     return probeFailure('UNKNOWN')
   }
 
-  const flags = new Map<string, boolean>()
-  collectGateFlags(body, flags)
-  const permissions = [...flags.entries()].filter(([, enabled]) => enabled).map(([name]) => name)
+  const readOnly = topLevelFlag(record, 'read_only')
+  const spotWrite = topLevelFlag(record, 'spot.write')
+  const futuresWrite = topLevelFlag(record, 'futures.write')
+  const withdrawWrite = topLevelFlag(record, 'withdraw.write')
+  const transferWrite = topLevelFlag(record, 'transfer.write')
+  const permissions = (GATE_FLAG_NAMES as readonly string[]).filter((name) => topLevelFlag(record, name) === true)
 
-  if (flags.get('withdraw.write') === true) return probeFailure('WITHDRAW_PERMISSION_DETECTED', permissions)
-  if (flags.get('spot.write') === true || flags.get('futures.write') === true) {
-    return probeFailure('TRADE_PERMISSION_DETECTED', permissions)
-  }
-  if (flags.get('transfer.write') === true) return probeFailure('TRANSFER_PERMISSION_DETECTED', permissions)
-  if (flags.get('read_only') === false) return probeFailure('INVALID_KEY', permissions)
+  if (withdrawWrite === true) return probeFailure('WITHDRAW_PERMISSION_DETECTED', permissions)
+  if (spotWrite === true || futuresWrite === true) return probeFailure('TRADE_PERMISSION_DETECTED', permissions)
+  if (transferWrite === true) return probeFailure('TRANSFER_PERMISSION_DETECTED', permissions)
+  if (readOnly === false) return probeFailure('INVALID_KEY', permissions)
 
-  const writePresent = WRITE_FLAGS.some((name) => flags.has(name))
-  if (!writePresent || !flags.has('read_only')) return probeOk(permissions, ['PERMISSIONS_UNVERIFIED'])
+  const confirmed =
+    readOnly === true &&
+    spotWrite === false &&
+    futuresWrite === false &&
+    withdrawWrite === false &&
+    transferWrite === false
+
+  if (!confirmed) return probeOk(permissions, ['PERMISSIONS_UNVERIFIED'])
   return probeOk(permissions, [])
 }

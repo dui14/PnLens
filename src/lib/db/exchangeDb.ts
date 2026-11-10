@@ -200,11 +200,11 @@ export async function getApiKey(
     secret_encrypted: String(data.secret_encrypted),
     passphrase_encrypted:
       typeof data.passphrase_encrypted === 'string' ? data.passphrase_encrypted : null,
-    proxy_encrypted: typeof data.proxy_encrypted === 'string' ? data.proxy_encrypted : null,
+    proxy_encrypted: null,
     key_iv: String(data.key_iv),
     secret_iv: String(data.secret_iv),
     passphrase_iv: typeof data.passphrase_iv === 'string' ? data.passphrase_iv : null,
-    proxy_iv: typeof data.proxy_iv === 'string' ? data.proxy_iv : null,
+    proxy_iv: null,
     key_version: typeof data.key_version === 'number' ? data.key_version : 1,
     created_at: String(data.created_at),
   }
@@ -296,14 +296,11 @@ export async function updateApiKeyRecord(
   keyIv: string,
   secretIv: string,
   passphraseEncrypted: string | null,
-  passphraseIv: string | null,
-  proxyEncrypted: string | null,
-  proxyIv: string | null
+  passphraseIv: string | null
 ): Promise<boolean> {
   let includePassphrase = true
-  let includeProxy = true
 
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
     const payload: Record<string, unknown> = {
       key_encrypted: keyEncrypted,
       secret_encrypted: secretEncrypted,
@@ -314,11 +311,6 @@ export async function updateApiKeyRecord(
     if (includePassphrase) {
       payload.passphrase_encrypted = passphraseEncrypted
       payload.passphrase_iv = passphraseIv
-    }
-
-    if (includeProxy) {
-      payload.proxy_encrypted = proxyEncrypted
-      payload.proxy_iv = proxyIv
     }
 
     const result = await supabase
@@ -332,21 +324,8 @@ export async function updateApiKeyRecord(
       hasMissingColumnError(result.error, 'passphrase_encrypted') ||
       hasMissingColumnError(result.error, 'passphrase_iv')
 
-    const missingProxyColumn =
-      hasMissingColumnError(result.error, 'proxy_encrypted') ||
-      hasMissingColumnError(result.error, 'proxy_iv')
-
-    if (!missingPassphraseColumn && !missingProxyColumn) {
-      return false
-    }
-
-    if (missingPassphraseColumn) {
-      includePassphrase = false
-    }
-
-    if (missingProxyColumn) {
-      includeProxy = false
-    }
+    if (!missingPassphraseColumn) return false
+    includePassphrase = false
   }
 
   return false

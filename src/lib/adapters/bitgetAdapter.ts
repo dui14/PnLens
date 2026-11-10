@@ -13,7 +13,7 @@ import {
   type CredentialProbeResult,
 } from './credentialValidation'
 
-const BASE_URL = 'https://api.bitget.com'
+import { BITGET_BASE_URL as BASE_URL } from './exchangeBases'
 const REQUEST_TIMEOUT = 10_000
 const DEFAULT_LOOKBACK_MS = 365 * 24 * 60 * 60 * 1000
 const BITGET_FUTURES_WINDOW_MS = 7 * 24 * 60 * 60 * 1000

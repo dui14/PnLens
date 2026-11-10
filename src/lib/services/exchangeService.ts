@@ -26,7 +26,12 @@ import { encrypt, decrypt } from '@/lib/adapters/encryption'
 import { createExchangeAdapter, type ExchangeAdapter } from '@/lib/adapters/exchangeFactory'
 import type { CredentialProbeResult } from '@/lib/adapters/credentialValidation'
 
-const STORED_WARNINGS = ['PERMISSIONS_UNVERIFIED', 'IP_RESTRICT_DISABLED', 'IP_WHITELIST_MISSING'] as const
+const STORED_WARNINGS = [
+  'PERMISSIONS_UNVERIFIED',
+  'IP_RESTRICT_DISABLED',
+  'IP_WHITELIST_MISSING',
+  'FUTURES_PERMISSION_PRESENT',
+] as const
 
 function getSyncLookbackDate(): Date {
   const lookback = new Date()
@@ -136,12 +141,12 @@ export async function connectExchange(
       null
     )
     if (!keyCreated) {
-      await deleteExchangeAccount(supabase, account.id, userId)
+      await removeOrphanAccount(supabase, account.id, userId)
       return { success: false, error: 'INTERNAL_ERROR' }
     }
-  } catch (error) {
-    await deleteExchangeAccount(supabase, account.id, userId)
-    throw error
+  } catch {
+    await removeOrphanAccount(supabase, account.id, userId)
+    return { success: false, error: 'INTERNAL_ERROR' }
   }
 
   return {
@@ -178,17 +183,12 @@ export async function syncExchangeAccount(
   await updateSyncStatus(supabase, exchangeAccountId, 'syncing', null)
 
   const serviceSupabase = (await import('@/lib/db/supabase-server')).createSupabaseServiceClient()
-  const apiKeyRow = await getApiKey(serviceSupabase, exchangeAccountId)
-  if (!apiKeyRow) {
-    await updateSyncStatus(supabase, exchangeAccountId, 'error', 'API_KEY_NOT_FOUND')
-    return { success: false, error: 'API_KEY_NOT_FOUND' }
+  const loaded = await loadStoredCredentials(serviceSupabase, exchangeAccountId)
+  if (!loaded.success) {
+    await updateSyncStatus(supabase, exchangeAccountId, 'error', loaded.error)
+    return { success: false, error: loaded.error }
   }
-
-  const credentials = decryptCredentials(apiKeyRow)
-  if (!credentials) {
-    await updateSyncStatus(supabase, exchangeAccountId, 'error', 'DECRYPTION_FAILED')
-    return { success: false, error: 'DECRYPTION_FAILED' }
-  }
+  const credentials = loaded.data
 
   const adapter = await createExchangeAdapter(account.exchange)
   const validation = await validateCredentialsForAdapter(adapter, credentials)
@@ -305,7 +305,8 @@ export async function updateExchangeApiKeys(
   passphrase?: string,
   label?: string,
   proxy?: string
-): Promise<Result<ExchangeAccount>> {
+): Promise<Result<{ account: ExchangeAccount; warnings: string[] }>> {
+  void proxy
   const account = await getExchangeAccountById(supabase, accountId, userId)
   if (!account) {
     return { success: false, error: 'NOT_FOUND' }
@@ -326,7 +327,6 @@ export async function updateExchangeApiKeys(
     apiKey,
     apiSecret,
     passphrase,
-    proxy,
   }
 
   const validation = await validateCredentialsForAdapter(adapter, credentials)
@@ -337,7 +337,6 @@ export async function updateExchangeApiKeys(
   const encryptedKey = encrypt(apiKey)
   const encryptedSecret = encrypt(apiSecret)
   const encryptedPassphrase = passphrase ? encrypt(passphrase) : null
-  const encryptedProxy = proxy ? encrypt(proxy) : null
 
   const serviceSupabase = (await import('@/lib/db/supabase-server')).createSupabaseServiceClient()
 
@@ -349,9 +348,7 @@ export async function updateExchangeApiKeys(
     encryptedKey.iv,
     encryptedSecret.iv,
     encryptedPassphrase?.encrypted ?? null,
-    encryptedPassphrase?.iv ?? null,
-    encryptedProxy?.encrypted ?? null,
-    encryptedProxy?.iv ?? null
+    encryptedPassphrase?.iv ?? null
   )
   if (!keyUpdated) {
     return { success: false, error: 'INTERNAL_ERROR' }
@@ -366,7 +363,13 @@ export async function updateExchangeApiKeys(
   }
 
   const updated = await getExchangeAccountById(supabase, accountId, userId)
-  return { success: true, data: updated ?? account }
+  return {
+    success: true,
+    data: {
+      account: updated ?? account,
+      warnings: storedWarnings(validation.data),
+    },
+  }
 }
 
 export async function fetchExchangeBalance(
@@ -384,18 +387,13 @@ export async function fetchExchangeBalance(
   }
 
   const serviceSupabase = (await import('@/lib/db/supabase-server')).createSupabaseServiceClient()
-  const apiKeyRow = await getApiKey(serviceSupabase, exchangeAccountId)
-  if (!apiKeyRow) {
-    return { success: false, error: 'API_KEY_NOT_FOUND' }
-  }
-
-  const credentials = decryptCredentials(apiKeyRow)
-  if (!credentials) {
-    return { success: false, error: 'DECRYPTION_FAILED' }
+  const loaded = await loadStoredCredentials(serviceSupabase, exchangeAccountId)
+  if (!loaded.success) {
+    return { success: false, error: loaded.error }
   }
 
   const adapter = await createExchangeAdapter(account.exchange)
-  const assets = await adapter.fetchBalances(credentials)
+  const assets = await adapter.fetchBalances(loaded.data)
   const totalUsd = assets.reduce((sum, asset) => sum + asset.usdValue, 0)
 
   return {
@@ -425,18 +423,13 @@ export async function fetchExchangePositions(
   }
 
   const serviceSupabase = (await import('@/lib/db/supabase-server')).createSupabaseServiceClient()
-  const apiKeyRow = await getApiKey(serviceSupabase, exchangeAccountId)
-  if (!apiKeyRow) {
-    return { success: false, error: 'API_KEY_NOT_FOUND' }
-  }
-
-  const credentials = decryptCredentials(apiKeyRow)
-  if (!credentials) {
-    return { success: false, error: 'DECRYPTION_FAILED' }
+  const loaded = await loadStoredCredentials(serviceSupabase, exchangeAccountId)
+  if (!loaded.success) {
+    return { success: false, error: loaded.error }
   }
 
   const adapter = await createExchangeAdapter(account.exchange)
-  const positions = await adapter.fetchOpenPositions(credentials)
+  const positions = await adapter.fetchOpenPositions(loaded.data)
   const totalUnrealizedPnl = positions.reduce((sum, position) => sum + position.unrealizedPnl, 0)
 
   return {
@@ -450,6 +443,33 @@ export async function fetchExchangePositions(
   }
 }
 
+async function removeOrphanAccount(
+  supabase: SupabaseClient,
+  accountId: string,
+  userId: string
+): Promise<void> {
+  try {
+    await deleteExchangeAccount(supabase, accountId, userId)
+  } catch {
+    return
+  }
+}
+
+async function loadStoredCredentials(
+  supabase: SupabaseClient,
+  exchangeAccountId: string
+): Promise<Result<ExchangeCredentials, 'NO_KEY' | 'DECRYPTION_FAILED'>> {
+  try {
+    const apiKeyRow = await getApiKey(supabase, exchangeAccountId)
+    if (!apiKeyRow) return { success: false, error: 'NO_KEY' }
+    const credentials = decryptCredentials(apiKeyRow)
+    if (!credentials) return { success: false, error: 'DECRYPTION_FAILED' }
+    return { success: true, data: credentials }
+  } catch {
+    return { success: false, error: 'NO_KEY' }
+  }
+}
+
 function decryptCredentials(apiKeyRow: {
   key_encrypted: string
   key_iv: string
@@ -457,8 +477,6 @@ function decryptCredentials(apiKeyRow: {
   secret_iv: string
   passphrase_encrypted: string | null
   passphrase_iv: string | null
-  proxy_encrypted: string | null
-  proxy_iv: string | null
 }): ExchangeCredentials | null {
   try {
     const apiKey = decrypt(apiKeyRow.key_encrypted, apiKeyRow.key_iv)
@@ -467,16 +485,11 @@ function decryptCredentials(apiKeyRow: {
       apiKeyRow.passphrase_encrypted && apiKeyRow.passphrase_iv
         ? decrypt(apiKeyRow.passphrase_encrypted, apiKeyRow.passphrase_iv)
         : undefined
-    const proxy =
-      apiKeyRow.proxy_encrypted && apiKeyRow.proxy_iv
-        ? decrypt(apiKeyRow.proxy_encrypted, apiKeyRow.proxy_iv)
-        : undefined
 
     return {
       apiKey,
       apiSecret,
       passphrase,
-      proxy,
     }
   } catch {
     return null

@@ -13,7 +13,7 @@ import {
   type CredentialProbeResult,
 } from './credentialValidation'
 
-const BASE_URL = 'https://api.gateio.ws/api/v4'
+import { GATEIO_BASE_URL as BASE_URL } from './exchangeBases'
 const REQUEST_TIMEOUT = 10_000
 const DEFAULT_LOOKBACK_MS = 365 * 24 * 60 * 60 * 1000
 const GATE_MAX_WINDOW_SECONDS = 30 * 24 * 60 * 60
@@ -117,9 +117,8 @@ export class GateioAdapter implements ExchangeAdapter {
   async validateCredentials(credentials: ExchangeCredentials): Promise<CredentialProbeResult> {
     try {
       const requestPath = '/account/detail'
-      const probePath = '/api/v4/account/detail'
       const headers = this.buildHeaders(credentials, 'GET', requestPath)
-      const response = await fetchWithRetry(`https://api.gateio.ws${probePath}`, {
+      const response = await fetchWithRetry(`${BASE_URL}${requestPath}`, {
         method: 'GET',
         headers,
       })

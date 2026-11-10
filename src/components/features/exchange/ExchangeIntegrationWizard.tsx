@@ -773,6 +773,7 @@ export function ExchangeIntegrationWizard(): React.JSX.Element {
           UNSUPPORTED_EXCHANGE: 'This exchange is not supported.',
           VALIDATION_ERROR: 'Please check your input and try again.',
           PERMISSIONS_UNVERIFIED: 'The key was saved. The exchange did not confirm that it is read-only.',
+          FUTURES_PERMISSION_PRESENT: 'This key can trade futures. The app never places orders. Use an IP whitelist.',
           IP_RESTRICT_DISABLED: 'The key was saved. It is not restricted to an IP allowlist.',
           IP_WHITELIST_MISSING: 'The key was saved. No IP allowlist was reported for this key.',
         }

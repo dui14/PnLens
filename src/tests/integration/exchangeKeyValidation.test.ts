@@ -57,6 +57,11 @@ vi.mock('@/lib/adapters/httpClient', async () => {
 })
 
 import { POST } from '@/app/api/exchange/connect/route'
+import { PUT } from '@/app/api/exchange/accounts/[id]/route'
+import { syncExchangeAccount } from '@/lib/services/exchangeService'
+import { interpretGateAccountDetail } from '@/lib/adapters/credentialValidation'
+import { resolveExchangeProxy } from '@/lib/adapters/httpClient'
+import type { SupabaseClient } from '@supabase/supabase-js'
 
 installFastSleep()
 
@@ -153,7 +158,7 @@ function unknownBody(exchange: ExchangeName): unknown {
   if (exchange === 'binance') return { enableFutures: true, msg: SECRET }
   if (exchange === 'okx') return { code: '0', data: [{}], msg: SECRET }
   if (exchange === 'bybit') {
-    return { retCode: 0, retMsg: SECRET, result: { readOnly: 1, permissions: { Custom: ['Nope'] }, ips: ['203.0.113.10'] } }
+    return { retCode: 0, retMsg: SECRET, result: { permissions: { Custom: ['Nope'] }, ips: ['203.0.113.10'] } }
   }
   if (exchange === 'bitget') {
     return {
@@ -205,6 +210,22 @@ describe('exchange key validation', () => {
     db.exchangeAccountExists.mockResolvedValue(false)
     db.deleteExchangeAccount.mockResolvedValue(true)
     db.createApiKey.mockResolvedValue(true)
+    db.updateApiKeyRecord.mockReset()
+    db.updateApiKeyRecord.mockResolvedValue(true)
+    db.getApiKey.mockReset()
+    db.updateSyncStatus.mockReset()
+    db.getExchangeAccountById.mockReset()
+    db.getExchangeAccountById.mockImplementation(async () => ({
+      id: 'acc-1',
+      user_id: authState.userId,
+      exchange: 'binance',
+      label: 'desk',
+      is_active: true,
+      sync_status: 'pending',
+      sync_error: null,
+      last_synced: null,
+      created_at: '2026-01-01T00:00:00.000Z',
+    }))
     db.createExchangeAccount.mockImplementation(async (_client: unknown, userId: string, exchange: string, label: string | null) => ({
       id: 'acc-1',
       user_id: userId,
@@ -322,6 +343,86 @@ describe('exchange key validation', () => {
     assertNoSecret(payload)
   })
 
+  it('returns CONFLICT before calling the exchange when the account already exists', async () => {
+    db.exchangeAccountExists.mockResolvedValue(true)
+    httpState.respond = () => jsonResponse(readOnlyBody('binance'))
+    const response = await postConnect(connectBody('binance'))
+    const payload = await response.json()
+
+    expect(response.status).toBe(409)
+    expect(payload).toEqual({ success: false, data: null, error: 'CONFLICT' })
+    expect(httpState.requests).toHaveLength(0)
+    expect(db.createExchangeAccount).not.toHaveBeenCalled()
+  })
+
+  it('accepts Binance futures permission only with FUTURES_PERMISSION_PRESENT', async () => {
+    httpState.respond = () => jsonResponse({
+      ...readOnlyBody('binance') as Record<string, boolean>,
+      enableFutures: true,
+      msg: SECRET,
+    })
+    const response = await postConnect(connectBody('binance'))
+    const payload = await response.json()
+
+    expect(response.status).toBe(201)
+    expect(payload.warnings).toEqual(['FUTURES_PERMISSION_PRESENT'])
+    assertNoSecret(payload)
+    expect(db.createApiKey).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not treat nested Gate.io flags as a read-only proof', () => {
+    const result = interpretGateAccountDetail(200, {
+      key: {
+        read_only: true,
+        'spot.write': false,
+        'futures.write': false,
+        'withdraw.write': false,
+        'transfer.write': false,
+      },
+      message: SECRET,
+    })
+    expect(result.ok).toBe(true)
+    expect(result.warnings).toEqual(['PERMISSIONS_UNVERIFIED'])
+    expect(JSON.stringify(result)).not.toContain(SECRET)
+  })
+
+  it('uses only EXCHANGE_PROXY_URL and ignores a stored or legacy proxy', () => {
+    const previousUrl = process.env.EXCHANGE_PROXY_URL
+    const previousLegacy = process.env.EXCHANGE_PROXY
+    process.env.EXCHANGE_PROXY_URL = 'http://platform.example:8080'
+    process.env.EXCHANGE_PROXY = 'http://legacy.example:8080'
+    const selected = resolveExchangeProxy(USER_PROXY)
+    delete process.env.EXCHANGE_PROXY_URL
+    const withoutPlatform = resolveExchangeProxy(USER_PROXY)
+    if (previousUrl === undefined) delete process.env.EXCHANGE_PROXY_URL
+    else process.env.EXCHANGE_PROXY_URL = previousUrl
+    if (previousLegacy === undefined) delete process.env.EXCHANGE_PROXY
+    else process.env.EXCHANGE_PROXY = previousLegacy
+
+    expect(selected).toContain('platform.example')
+    expect(selected).not.toContain('evil.example')
+    expect(selected).not.toContain('legacy.example')
+    expect(withoutPlatform).toBeNull()
+  })
+
+  it('returns NO_KEY when scan finds an account without a key', async () => {
+    db.getApiKey.mockResolvedValue(null)
+    const result = await syncExchangeAccount({} as SupabaseClient, authState.userId, 'acc-1')
+    expect(result).toEqual({ success: false, error: 'NO_KEY' })
+    expect(httpState.requests).toHaveLength(0)
+  })
+
+  it('still returns INTERNAL_ERROR when deleting an orphan account throws', async () => {
+    httpState.respond = () => jsonResponse(readOnlyBody('binance'))
+    db.createApiKey.mockResolvedValue(false)
+    db.deleteExchangeAccount.mockRejectedValue(new Error('delete failed'))
+    const response = await postConnect(connectBody('binance'))
+    const payload = await response.json()
+    expect(response.status).toBe(500)
+    expect(payload).toEqual({ success: false, data: null, error: 'INTERNAL_ERROR' })
+    assertNoSecret(payload)
+  })
+
   it('stops calling the exchange after the validation attempt limit', async () => {
     authState.userId = 'rate-limit-user'
     httpState.respond = () => jsonResponse({ code: -2014, msg: SECRET }, 400)
@@ -334,5 +435,77 @@ describe('exchange key validation', () => {
     expect(lastStatus).toBe(429)
     expect(httpState.requests).toHaveLength(10)
     expect(db.createExchangeAccount).not.toHaveBeenCalled()
+  })
+
+  describe('PUT /api/exchange/accounts/:id', () => {
+  function putBody(): Record<string, string> {
+    return {
+      apiKey: credentials.apiKey,
+      apiSecret: SECRET,
+      passphrase: credentials.passphrase,
+      proxy: USER_PROXY,
+    }
+  }
+
+  async function putKeys(): Promise<Response> {
+    return PUT(
+      new NextRequest('http://localhost/api/exchange/accounts/acc-1', {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(putBody()),
+      }),
+      { params: Promise.resolve({ id: 'acc-1' }) }
+    )
+  }
+
+  it('validates a changed key and does not write proxy columns', async () => {
+    httpState.respond = () => jsonResponse(readOnlyBody('binance'))
+    const response = await putKeys()
+    const payload = await response.json()
+
+    expect(response.status).toBe(200)
+    expect(payload.success).toBe(true)
+    assertNoSecret(payload)
+    expect(db.updateApiKeyRecord).toHaveBeenCalledTimes(1)
+    assertNoSecret(db.updateApiKeyRecord.mock.calls)
+    expect(JSON.stringify(db.updateApiKeyRecord.mock.calls)).not.toContain('proxy')
+    expect(httpState.requests.filter((url) => url.includes('/sapi/v1/account/apiRestrictions'))).toHaveLength(1)
+  })
+
+  it('stores nothing when validation fails', async () => {
+    httpState.respond = () => jsonResponse({ code: -2014, msg: SECRET }, 400)
+    const response = await putKeys()
+    const payload = await response.json()
+
+    expect(response.status).toBe(400)
+    expect(payload).toEqual({ success: false, data: null, error: 'INVALID_KEY' })
+    expect(db.updateApiKeyRecord).not.toHaveBeenCalled()
+    assertNoSecret(payload)
+  })
+
+  it('maps an upstream 500 to EXCHANGE_UNREACHABLE and writes nothing', async () => {
+    httpState.respond = () => jsonResponse({ msg: SECRET }, 500)
+    const response = await putKeys()
+    const payload = await response.json()
+
+    expect(response.status).toBe(502)
+    expect(payload).toEqual({ success: false, data: null, error: 'EXCHANGE_UNREACHABLE' })
+    expect(db.updateApiKeyRecord).not.toHaveBeenCalled()
+    assertNoSecret(payload)
+  })
+
+  it('shares the validation attempt limit and does not call the exchange when exceeded', async () => {
+    authState.userId = 'put-rate-limit-user'
+    httpState.respond = () => jsonResponse({ code: -2014, msg: SECRET }, 400)
+    let lastStatus = 0
+    for (let attempt = 0; attempt < 11; attempt += 1) {
+      const response = await putKeys()
+      lastStatus = response.status
+      assertNoSecret(await response.json())
+    }
+    expect(lastStatus).toBe(429)
+    expect(httpState.requests).toHaveLength(10)
+    expect(db.updateApiKeyRecord).not.toHaveBeenCalled()
+  })
   })
 })

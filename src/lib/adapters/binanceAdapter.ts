@@ -12,10 +12,8 @@ import {
   readJson,
   type CredentialProbeResult,
 } from './credentialValidation'
+import { BINANCE_BASE_URL as BASE_URL, BINANCE_FUTURES_BASE_URL as FUTURES_URL } from './exchangeBases'
 import { fetchExchange } from './httpClient'
-
-const BASE_URL = 'https://api.binance.com'
-const FUTURES_URL = 'https://fapi.binance.com'
 const REQUEST_TIMEOUT = 10_000
 const RECV_WINDOW = 10_000
 const DEFAULT_LOOKBACK_MS = 365 * 24 * 60 * 60 * 1000
@@ -99,19 +97,10 @@ export class BinanceAdapter implements ExchangeAdapter {
     | null = null
 
   private async withProxy<T>(
-    credentials: ExchangeCredentials,
+    _credentials: ExchangeCredentials,
     fn: () => Promise<T>
   ): Promise<T> {
-    const previousProxy = this.proxy
-    if (typeof credentials.proxy === 'string') {
-      this.proxy = credentials.proxy.trim() || null
-    }
-
-    try {
-      return await fn()
-    } finally {
-      this.proxy = previousProxy
-    }
+    return fn()
   }
 
   private async fetchWithRetry(
