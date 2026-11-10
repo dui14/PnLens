@@ -18,18 +18,20 @@ src/.env.*
 mcp.json
 **/*mcp.json
 
-# Context 
+# Context and local-only docs
 ai-context/
 database/
 diagram/
 .agents/
 AGENTS.md
 .github/copilot-instructions.md
-spec/ 
-# Markdown, keep the two published docs
+spec/
+docs/
+tests/
+
+# Markdown
 **/*.md
 !README.md
-!docs/ARCHITECTURE.md
 
 # OS
 Thumbs.db
