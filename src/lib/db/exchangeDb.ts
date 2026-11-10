@@ -25,6 +25,7 @@ function normalizeExchangeAccount(row: Record<string, unknown>, userId: string):
     is_active: Boolean(row.is_active),
     sync_status: syncStatus,
     sync_error: syncError,
+    sync_started_at: typeof row.sync_started_at === 'string' ? row.sync_started_at : null,
     last_synced: typeof row.last_synced === 'string' ? row.last_synced : null,
     created_at: typeof row.created_at === 'string' ? row.created_at : new Date().toISOString(),
   }
@@ -237,6 +238,84 @@ export async function updateLastSynced(
       .update({ last_synced: new Date().toISOString() })
       .eq('id', accountId)
   }
+}
+
+export type ScanClaimResult = 'claimed' | 'not_found' | 'inactive' | 'in_progress' | 'rate_limited'
+
+export async function getExchangeAccountByAccountId(
+  supabase: SupabaseClient,
+  accountId: string
+): Promise<ExchangeAccount | null> {
+  const { data, error } = await supabase
+    .from('exchange_accounts')
+    .select('*')
+    .eq('id', accountId)
+    .maybeSingle()
+
+  if (error || !data) return null
+  return normalizeExchangeAccount(data as unknown as Record<string, unknown>, String(data.user_id ?? ''))
+}
+
+export async function claimExchangeScan(
+  supabase: SupabaseClient,
+  accountId: string,
+  userId: string,
+  nowIso: string,
+  cooldownBeforeIso: string,
+  staleBeforeIso: string
+): Promise<ScanClaimResult> {
+  const existing = await getExchangeAccountById(supabase, accountId, userId)
+  if (!existing) return 'not_found'
+  if (!existing.is_active) return 'inactive'
+
+  const claimed = await updateScanClaim(supabase, accountId, userId, nowIso, cooldownBeforeIso, staleBeforeIso)
+  if (claimed === 'claimed') return 'claimed'
+  if (claimed === 'missing_column') {
+    const fallback = await supabase
+      .from('exchange_accounts')
+      .update({ sync_status: 'syncing', sync_error: null })
+      .eq('id', accountId)
+      .eq('user_id', userId)
+      .eq('is_active', true)
+      .neq('sync_status', 'syncing')
+      .or(`last_synced.is.null,last_synced.lte."${cooldownBeforeIso}"`)
+      .select('id')
+    if (!fallback.error && (fallback.data?.length ?? 0) > 0) return 'claimed'
+  }
+
+  const latest = await getExchangeAccountById(supabase, accountId, userId)
+  if (!latest) return 'not_found'
+  if (!latest.is_active) return 'inactive'
+  if (latest.sync_status === 'syncing') return 'in_progress'
+  return 'rate_limited'
+}
+
+async function updateScanClaim(
+  supabase: SupabaseClient,
+  accountId: string,
+  userId: string,
+  nowIso: string,
+  cooldownBeforeIso: string,
+  staleBeforeIso: string
+): Promise<'claimed' | 'empty' | 'missing_column'> {
+  const result = await supabase
+    .from('exchange_accounts')
+    .update({
+      sync_status: 'syncing',
+      sync_error: null,
+      sync_started_at: nowIso,
+    })
+    .eq('id', accountId)
+    .eq('user_id', userId)
+    .eq('is_active', true)
+    .or(
+      `and(sync_status.neq.syncing,or(last_synced.is.null,last_synced.lte."${cooldownBeforeIso}")),and(sync_status.eq.syncing,sync_started_at.lte."${staleBeforeIso}")`
+    )
+    .select('id')
+
+  if (result.error && hasMissingColumnError(result.error, 'sync_started_at')) return 'missing_column'
+  if (result.error) return 'empty'
+  return (result.data?.length ?? 0) > 0 ? 'claimed' : 'empty'
 }
 
 export async function updateSyncStatus(

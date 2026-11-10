@@ -132,13 +132,15 @@ describe('OKXAdapter', () => {
     await expect(new OKXAdapter().fetchTrades(credentials, recentSince())).resolves.toEqual([])
   })
 
-  it('returns no trades when the exchange responds with an error', async () => {
+  it('fails the scan window when the exchange responds with HTTP 500', async () => {
     handler = (url) => {
       if (url.includes('/api/v5/public/instruments')) return defaultRoute(url)
       return jsonResponse({ code: '50000', msg: 'error' }, 500)
     }
 
-    await expect(new OKXAdapter().fetchTrades(credentials, recentSince())).resolves.toEqual([])
+    await expect(new OKXAdapter().fetchTrades(credentials, recentSince())).rejects.toMatchObject({
+      code: 'EXCHANGE_ERROR',
+    })
   })
 
   it('retries a rate limit and then reads the fill', async () => {

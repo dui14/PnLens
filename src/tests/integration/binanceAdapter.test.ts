@@ -162,14 +162,22 @@ describe('BinanceAdapter', () => {
     expect(trades).toEqual([])
   })
 
-  it('treats an invalid symbol and a server error as an empty fill page', async () => {
+  it('treats an invalid symbol as an empty fill page and a server error as a failed window', async () => {
     http.handler = (url) => {
       if (url.includes('/api/v3/myTrades')) return jsonResponse({ code: -1121, msg: 'Invalid symbol' }, 400)
-      if (url.includes('/fapi/v1/userTrades')) return jsonResponse({ code: -1000, msg: 'server' }, 500)
       return defaultRoute(url)
     }
 
     await expect(new BinanceAdapter().fetchTrades(credentials, recentSince())).resolves.toEqual([])
+
+    http.handler = (url) => {
+      if (url.includes('/fapi/v1/userTrades')) return jsonResponse({ code: -1000, msg: 'server' }, 500)
+      return defaultRoute(url)
+    }
+
+    await expect(new BinanceAdapter().fetchTrades(credentials, recentSince())).rejects.toMatchObject({
+      code: 'EXCHANGE_ERROR',
+    })
   })
 
   it('retries a spot rate limit and then maps the fill', async () => {

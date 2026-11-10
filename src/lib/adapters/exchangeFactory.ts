@@ -13,7 +13,8 @@ export interface ExchangeAdapter {
   rejectedTradeCounts(): TradeRejectCounts
   fetchTrades(
     credentials: ExchangeCredentials,
-    since?: Date
+    since?: Date,
+    until?: Date
   ): Promise<ExchangeAdapterTrade[]>
   fetchOpenPositions(
     credentials: ExchangeCredentials

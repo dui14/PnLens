@@ -13,6 +13,7 @@ import {
   type CredentialProbeResult,
 } from './credentialValidation'
 import { fetchExchange } from './httpClient'
+import { throwOnServerPage } from './exchangeWindowError'
 import {
   TradeRejectCounter,
   addDecimals,
@@ -136,11 +137,14 @@ export class BybitAdapter implements ExchangeAdapter {
     })
   }
 
-  async fetchTrades(credentials: ExchangeCredentials, since?: Date): Promise<ExchangeAdapterTrade[]> {
+  private scanEndMs = 0
+
+  async fetchTrades(credentials: ExchangeCredentials, since?: Date, until?: Date): Promise<ExchangeAdapterTrade[]> {
+    this.scanEndMs = until?.getTime() ?? Date.now()
     this.rejections.reset()
     return this.withProxy(credentials, async () => {
       const startTime = since ? since.getTime() : Date.now() - DEFAULT_LOOKBACK_MS
-      const now = Date.now()
+      const now = this.scanEndMs
       const categories: Array<{ category: 'spot' | 'linear' | 'inverse'; tradeType: 'spot' | 'futures' }> = [
         { category: 'spot', tradeType: 'spot' },
         { category: 'linear', tradeType: 'futures' },
@@ -169,7 +173,8 @@ export class BybitAdapter implements ExchangeAdapter {
               const queryString = query.toString()
               const headers = this.buildHeaders(credentials, queryString)
               const response = await this.fetchWithRetry(`${BASE_URL}/v5/execution/list?${queryString}`, { headers })
-              if (!response.ok) break
+              throwOnServerPage(response)
+          if (!response.ok) break
 
               const data = (await response.json()) as {
                 retCode: number
@@ -336,7 +341,8 @@ export class BybitAdapter implements ExchangeAdapter {
           headers,
         })
 
-        if (!response.ok) break
+        throwOnServerPage(response)
+          if (!response.ok) break
 
         const data = (await response.json()) as {
           retCode: number

@@ -14,6 +14,8 @@ import {
 } from './credentialValidation'
 
 import { GATEIO_BASE_URL as BASE_URL } from './exchangeBases'
+import { fetchExchange } from './httpClient'
+import { throwOnServerPage } from './exchangeWindowError'
 import {
   TradeRejectCounter,
   decimalOrZero,
@@ -50,13 +52,6 @@ function asNumber(value: unknown): number {
   return Number.isFinite(parsed) ? parsed : 0
 }
 
-function asNullableNumber(value: unknown): number | null {
-  if (value === null || value === undefined || value === '') return null
-  const parsed = Number(value)
-  if (!Number.isFinite(parsed)) return null
-  return parsed
-}
-
 function normalizeSymbol(raw: string | undefined): string {
   if (!raw) return ''
   return raw.replace(/[^A-Z0-9]/gi, '').toUpperCase()
@@ -70,7 +65,7 @@ async function fetchWithTimeout(url: string, options?: RequestInit): Promise<Res
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT)
   try {
-    return await fetch(url, { ...options, signal: controller.signal })
+    return await fetchExchange(url, { ...options, signal: controller.signal })
   } finally {
     clearTimeout(timer)
   }
@@ -143,7 +138,10 @@ export class GateioAdapter implements ExchangeAdapter {
     return false
   }
 
-  async fetchTrades(credentials: ExchangeCredentials, since?: Date): Promise<ExchangeAdapterTrade[]> {
+  private scanEndMs = 0
+
+  async fetchTrades(credentials: ExchangeCredentials, since?: Date, until?: Date): Promise<ExchangeAdapterTrade[]> {
+    this.scanEndMs = until?.getTime() ?? Date.now()
     this.rejections.reset()
     const startMs = since ? since.getTime() : Date.now() - DEFAULT_LOOKBACK_MS
 
@@ -244,7 +242,7 @@ export class GateioAdapter implements ExchangeAdapter {
     startMs: number
   ): Promise<ExchangeAdapterTrade[]> {
     const allTrades: ExchangeAdapterTrade[] = []
-    const nowSec = Math.floor(Date.now() / 1000)
+    const nowSec = Math.floor(this.scanEndMs / 1000)
     let windowStartSec = Math.floor(startMs / 1000)
 
     while (windowStartSec <= nowSec) {
@@ -265,7 +263,8 @@ export class GateioAdapter implements ExchangeAdapter {
           headers,
         })
 
-        if (!response.ok) break
+        throwOnServerPage(response)
+          if (!response.ok) break
         const data = (await response.json()) as unknown
         if (!Array.isArray(data)) break
         const pageTrades = data as GateSpotTrade[]
@@ -290,11 +289,10 @@ export class GateioAdapter implements ExchangeAdapter {
   ): Promise<ExchangeAdapterTrade[]> {
     const settles = ['usdt', 'btc']
     const allTrades: ExchangeAdapterTrade[] = []
-    const nowSec = Math.floor(Date.now() / 1000)
+    const nowSec = Math.floor(this.scanEndMs / 1000)
     const startSec = Math.floor(startMs / 1000)
 
     for (const settle of settles) {
-      const futuresContractSpecs = await this.getFuturesContractSpecs(settle)
       let windowStartSec = startSec
       while (windowStartSec <= nowSec) {
         const windowEndSec = Math.min(windowStartSec + GATE_MAX_WINDOW_SECONDS - 1, nowSec)
@@ -314,6 +312,7 @@ export class GateioAdapter implements ExchangeAdapter {
             headers,
           })
 
+          throwOnServerPage(response)
           if (!response.ok) break
           const data = (await response.json()) as unknown
           if (!Array.isArray(data)) break
@@ -322,7 +321,7 @@ export class GateioAdapter implements ExchangeAdapter {
 
           allTrades.push(
             ...pageTrades.flatMap((trade) =>
-              this.accepted(this.normalizeFuturesTrade(trade, settle, futuresContractSpecs))
+              this.accepted(this.normalizeFuturesTrade(trade, settle))
             )
           )
 
@@ -344,7 +343,7 @@ export class GateioAdapter implements ExchangeAdapter {
   ): Promise<ExchangeAdapterTrade[]> {
     const settles = ['usdt', 'btc']
     const events: ExchangeAdapterTrade[] = []
-    const nowSec = Math.floor(Date.now() / 1000)
+    const nowSec = Math.floor(this.scanEndMs / 1000)
     const startSec = Math.floor(startMs / 1000)
 
     for (const settle of settles) {
@@ -367,6 +366,7 @@ export class GateioAdapter implements ExchangeAdapter {
             headers,
           })
 
+          throwOnServerPage(response)
           if (!response.ok) break
           const data = (await response.json()) as unknown
           if (!Array.isArray(data)) break
@@ -446,11 +446,7 @@ export class GateioAdapter implements ExchangeAdapter {
     }
   }
 
-  private normalizeFuturesTrade(
-    trade: GateFuturesTrade,
-    settle: string,
-    _futuresContractSpecs: Map<string, GateFuturesContractSpec>
-  ): ExchangeAdapterTrade | null {
+  private normalizeFuturesTrade(trade: GateFuturesTrade, settle: string): ExchangeAdapterTrade | null {
     const tradedAt = toIsoFromGateTimestamp(trade.create_time_ms ?? trade.create_time)
     if (!tradedAt) return this.rejections.reject('INVALID_TIMESTAMP')
     const externalTradeId = this.stableTradeId(

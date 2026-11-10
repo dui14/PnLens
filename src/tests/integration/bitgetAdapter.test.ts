@@ -199,9 +199,11 @@ describe('BitgetAdapter', () => {
     await expect(new BitgetAdapter().fetchTrades(credentials, recentSince())).resolves.toEqual([])
   })
 
-  it('returns no trades when spot and futures requests fail', async () => {
+  it('fails the scan window when spot and futures requests return HTTP 500', async () => {
     handler = () => jsonResponse({ code: '40001', msg: 'error' }, 500)
-    await expect(new BitgetAdapter().fetchTrades(credentials, recentSince())).resolves.toEqual([])
+    await expect(new BitgetAdapter().fetchTrades(credentials, recentSince())).rejects.toMatchObject({
+      code: 'EXCHANGE_ERROR',
+    })
   })
 
   it('retries a spot rate limit', async () => {

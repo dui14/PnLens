@@ -25,6 +25,12 @@ import { deleteExchangeTrackingData, upsertTrades } from '@/lib/db/tradesDb'
 import { encrypt, decrypt } from '@/lib/adapters/encryption'
 import { createExchangeAdapter, type ExchangeAdapter } from '@/lib/adapters/exchangeFactory'
 import type { CredentialProbeResult } from '@/lib/adapters/credentialValidation'
+import { SCAN_COOLDOWN_MS, SCAN_STALE_AFTER_MS } from '@/lib/scan/scanLimits'
+
+export { SCAN_COOLDOWN_MS, SCAN_STALE_AFTER_MS }
+
+export const SCAN_ROW_SKIP_CODE = 'ROWS_SKIPPED'
+export const SCAN_COVERAGE_GAP = 'COVERAGE_GAP'
 
 const STORED_WARNINGS = [
   'PERMISSIONS_UNVERIFIED',

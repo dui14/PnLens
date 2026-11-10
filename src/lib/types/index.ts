@@ -46,6 +46,7 @@ export type ExchangeAccount = {
   is_active: boolean
   sync_status: SyncStatus
   sync_error: string | null
+  sync_started_at: string | null
   last_synced: string | null
   created_at: string
 }

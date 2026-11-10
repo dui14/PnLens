@@ -1,7 +1,16 @@
-import { NextRequest, NextResponse } from 'next/server'
+import { after, NextRequest, NextResponse } from 'next/server'
 import { createSupabaseServerClient } from '@/lib/db/supabase-server'
+import { claimExchangeScan, type ScanClaimResult } from '@/lib/db/exchangeDb'
+import { SCAN_COOLDOWN_MS, SCAN_STALE_AFTER_MS } from '@/lib/scan/scanLimits'
+import { runScan } from '@/lib/scan/runScan'
 import { SyncExchangeSchema } from '@/lib/validators/exchange'
-import { syncExchangeAccount } from '@/lib/services/exchangeService'
+
+const CLAIM_STATUS: Record<Exclude<ScanClaimResult, 'claimed'>, { status: number; error: string }> = {
+  not_found: { status: 404, error: 'NOT_FOUND' },
+  inactive: { status: 400, error: 'ACCOUNT_INACTIVE' },
+  in_progress: { status: 409, error: 'SYNC_IN_PROGRESS' },
+  rate_limited: { status: 429, error: 'RATE_LIMITED' },
+}
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   const supabase = await createSupabaseServerClient()
@@ -34,26 +43,33 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     )
   }
 
-  const result = await syncExchangeAccount(supabase, user.id, parsed.data.exchangeAccountId)
+  const now = new Date()
+  const claim = await claimExchangeScan(
+    supabase,
+    parsed.data.exchangeAccountId,
+    user.id,
+    now.toISOString(),
+    new Date(now.getTime() - SCAN_COOLDOWN_MS).toISOString(),
+    new Date(now.getTime() - SCAN_STALE_AFTER_MS).toISOString()
+  )
 
-  if (!result.success) {
-    const statusMap: Record<string, number> = {
-      NOT_FOUND: 404,
-      ACCOUNT_INACTIVE: 400,
-      API_KEY_NOT_FOUND: 404,
-      NO_KEY: 404,
-      DECRYPTION_FAILED: 500,
-      EXCHANGE_REGION_BLOCKED: 502,
-      EXCHANGE_UNREACHABLE: 502,
-      EXCHANGE_TIME_DRIFT: 400,
-      EXCHANGE_ERROR: 502,
-      INTERNAL_ERROR: 500,
-    }
+  if (claim !== 'claimed') {
+    const mapped = CLAIM_STATUS[claim]
     return NextResponse.json(
-      { success: false, data: null, error: result.error },
-      { status: statusMap[result.error] ?? 500 }
+      { success: false, data: null, error: mapped.error },
+      { status: mapped.status }
     )
   }
 
-  return NextResponse.json({ success: true, data: result.data, error: null })
+  const exchangeAccountId = parsed.data.exchangeAccountId
+  after(() => {
+    void runScan(exchangeAccountId).catch(() => {
+      console.error('[exchange/sync] background scan failed:', 'EXCHANGE_ERROR')
+    })
+  })
+
+  return NextResponse.json(
+    { success: true, data: { exchangeAccountId, sync_status: 'syncing' }, error: null },
+    { status: 202 }
+  )
 }

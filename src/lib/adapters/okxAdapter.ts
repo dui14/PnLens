@@ -14,6 +14,8 @@ import {
 } from './credentialValidation'
 
 import { OKX_BASE_URL as BASE_URL } from './exchangeBases'
+import { fetchExchange } from './httpClient'
+import { throwOnServerPage } from './exchangeWindowError'
 import {
   TradeRejectCounter,
   addDecimals,
@@ -33,7 +35,7 @@ async function fetchWithTimeout(url: string, options?: RequestInit): Promise<Res
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT)
   try {
-    return await fetch(url, { ...options, signal: controller.signal })
+    return await fetchExchange(url, { ...options, signal: controller.signal })
   } finally {
     clearTimeout(timer)
   }
@@ -54,7 +56,6 @@ async function fetchWithRetry(url: string, options?: RequestInit, attempt = 0): 
 }
 
 export class OKXAdapter implements ExchangeAdapter {
-  private futuresContractSpecsPromise: Promise<Map<string, OKXFuturesContractSpec>> | null = null
   private readonly rejections = new TradeRejectCounter()
 
   rejectedTradeCounts(): TradeRejectCounts {
@@ -104,13 +105,15 @@ export class OKXAdapter implements ExchangeAdapter {
     }
   }
 
-  async fetchTrades(credentials: ExchangeCredentials, since?: Date): Promise<ExchangeAdapterTrade[]> {
+  private scanEndMs = 0
+
+  async fetchTrades(credentials: ExchangeCredentials, since?: Date, until?: Date): Promise<ExchangeAdapterTrade[]> {
+    this.scanEndMs = until?.getTime() ?? Date.now()
     this.rejections.reset()
     const startDate = since ?? new Date(Date.now() - DEFAULT_LOOKBACK_MS)
-    const futuresContractSpecs = await this.getFuturesContractSpecs()
 
     const [fillTrades, fundingTrades] = await Promise.all([
-      this.fetchTradeFills(credentials, startDate, futuresContractSpecs),
+      this.fetchTradeFills(credentials, startDate),
       this.fetchFundingBills(credentials, startDate),
     ])
 
@@ -119,16 +122,15 @@ export class OKXAdapter implements ExchangeAdapter {
       return merged
     }
 
-    return this.fetchBillsArchiveFallback(credentials, startDate, futuresContractSpecs)
+    return this.fetchBillsArchiveFallback(credentials, startDate)
   }
 
   private async fetchTradeFills(
     credentials: ExchangeCredentials,
-    since: Date,
-    futuresContractSpecs: Map<string, OKXFuturesContractSpec>
+    since: Date
   ): Promise<ExchangeAdapterTrade[]> {
     const startTime = since.getTime()
-    const now = Date.now()
+    const now = this.scanEndMs
     const instTypes: Array<'SPOT' | 'SWAP' | 'FUTURES'> = ['SPOT', 'SWAP', 'FUTURES']
     const rows: ExchangeAdapterTrade[] = []
 
@@ -150,6 +152,7 @@ export class OKXAdapter implements ExchangeAdapter {
           const headers = this.buildHeaders(credentials, 'GET', path)
           const response = await fetchWithRetry(`${BASE_URL}${path}`, { headers })
 
+          throwOnServerPage(response)
           if (!response.ok) break
 
           const payload = (await response.json()) as { code: string; data?: OKXFill[] }
@@ -160,7 +163,7 @@ export class OKXAdapter implements ExchangeAdapter {
 
           let oldestTs = cursorEnd
           for (const item of list) {
-            const normalized = this.normalizeFill(item, futuresContractSpecs)
+            const normalized = this.normalizeFill(item)
             if (normalized) rows.push(normalized)
 
             const itemTs = Number.parseInt(String(item.ts ?? ''), 10)
@@ -192,7 +195,7 @@ export class OKXAdapter implements ExchangeAdapter {
     since: Date
   ): Promise<ExchangeAdapterTrade[]> {
     const startTime = since.getTime()
-    const now = Date.now()
+    const now = this.scanEndMs
     const rows: ExchangeAdapterTrade[] = []
     let windowStart = startTime
 
@@ -211,7 +214,8 @@ export class OKXAdapter implements ExchangeAdapter {
         const headers = this.buildHeaders(credentials, 'GET', path)
         const response = await fetchWithRetry(`${BASE_URL}${path}`, { headers })
 
-        if (!response.ok) break
+        throwOnServerPage(response)
+          if (!response.ok) break
 
         const payload = (await response.json()) as { code: string; data?: OKXBill[] }
         if (payload.code !== '0') break
@@ -247,11 +251,10 @@ export class OKXAdapter implements ExchangeAdapter {
 
   private async fetchBillsArchiveFallback(
     credentials: ExchangeCredentials,
-    since: Date,
-    futuresContractSpecs: Map<string, OKXFuturesContractSpec>
+    since: Date
   ): Promise<ExchangeAdapterTrade[]> {
     const startTime = since.getTime()
-    const now = Date.now()
+    const now = this.scanEndMs
     const rows: ExchangeAdapterTrade[] = []
     let windowStart = startTime
 
@@ -269,7 +272,8 @@ export class OKXAdapter implements ExchangeAdapter {
         const headers = this.buildHeaders(credentials, 'GET', path)
         const response = await fetchWithRetry(`${BASE_URL}${path}`, { headers })
 
-        if (!response.ok) break
+        throwOnServerPage(response)
+          if (!response.ok) break
 
         const payload = (await response.json()) as { code: string; data?: OKXBill[] }
         if (payload.code !== '0') break
@@ -280,7 +284,7 @@ export class OKXAdapter implements ExchangeAdapter {
         let oldestTs = cursorEnd
         for (const item of list) {
           if (!['2', '8', '14'].includes(String(item.type ?? ''))) continue
-          const normalized = this.normalizeBill(item, futuresContractSpecs)
+          const normalized = this.normalizeBill(item)
           if (normalized) rows.push(normalized)
 
           const itemTs = Number.parseInt(String(item.ts ?? ''), 10)
@@ -361,10 +365,7 @@ export class OKXAdapter implements ExchangeAdapter {
     return result
   }
 
-  private normalizeBill(
-    bill: OKXBill,
-    _futuresContractSpecs: Map<string, OKXFuturesContractSpec>
-  ): ExchangeAdapterTrade | null {
+  private normalizeBill(bill: OKXBill): ExchangeAdapterTrade | null {
     const tradedAt = flexibleTimeToIso(bill.ts)
     if (!tradedAt) return this.rejections.reject('INVALID_TIMESTAMP')
     const billId = String(bill.billId ?? '').trim()
@@ -396,10 +397,7 @@ export class OKXAdapter implements ExchangeAdapter {
     }
   }
 
-  private normalizeFill(
-    fill: OKXFill,
-    _futuresContractSpecs: Map<string, OKXFuturesContractSpec>
-  ): ExchangeAdapterTrade | null {
+  private normalizeFill(fill: OKXFill): ExchangeAdapterTrade | null {
     const tradedAt = flexibleTimeToIso(fill.ts)
     if (!tradedAt) return this.rejections.reject('INVALID_TIMESTAMP')
     const tradeId = String(fill.tradeId ?? fill.ordId ?? '').trim()
@@ -428,63 +426,6 @@ export class OKXAdapter implements ExchangeAdapter {
       traded_at: tradedAt,
       raw_data: fill as unknown as Record<string, unknown>,
     }
-  }
-
-  private async getFuturesContractSpecs(): Promise<Map<string, OKXFuturesContractSpec>> {
-    if (!this.futuresContractSpecsPromise) {
-      this.futuresContractSpecsPromise = this.fetchFuturesContractSpecs()
-    }
-
-    return this.futuresContractSpecsPromise
-  }
-
-  private async fetchFuturesContractSpecs(): Promise<Map<string, OKXFuturesContractSpec>> {
-    const specs = new Map<string, OKXFuturesContractSpec>()
-    const instTypes: Array<'SWAP' | 'FUTURES'> = ['SWAP', 'FUTURES']
-
-    for (const instType of instTypes) {
-      const query = new URLSearchParams({ instType })
-      const path = `/api/v5/public/instruments?${query.toString()}`
-      const response = await fetchWithRetry(`${BASE_URL}${path}`)
-      if (!response.ok) {
-        continue
-      }
-
-      const payload = (await response.json()) as {
-        code: string
-        data?: OKXPublicInstrument[]
-      }
-
-      if (payload.code !== '0' || !Array.isArray(payload.data)) {
-        continue
-      }
-
-      for (const instrument of payload.data) {
-        const instId = String(instrument.instId ?? '').toUpperCase()
-        if (!instId) {
-          continue
-        }
-
-        const ctVal = Number.parseFloat(String(instrument.ctVal ?? ''))
-        if (!Number.isFinite(ctVal) || ctVal <= 0) {
-          continue
-        }
-
-        const [baseCcyRaw, quoteCcyRaw] = instId.split('-')
-        const baseCcy = String(baseCcyRaw ?? '').toUpperCase()
-        const quoteCcy = String(quoteCcyRaw ?? '').toUpperCase()
-        const ctValCcyRaw = String(instrument.ctValCcy ?? '').toUpperCase()
-
-        specs.set(instId, {
-          ctVal,
-          ctValCcy: ctValCcyRaw || null,
-          baseCcy,
-          quoteCcy,
-        })
-      }
-    }
-
-    return specs
   }
 
   private normalizeFundingBill(bill: OKXBill): ExchangeAdapterTrade | null {
@@ -577,17 +518,4 @@ type OKXPosition = {
   markPx: string
   upl: string
   lever: string
-}
-
-type OKXPublicInstrument = {
-  instId?: string
-  ctVal?: string
-  ctValCcy?: string
-}
-
-type OKXFuturesContractSpec = {
-  ctVal: number
-  ctValCcy: string | null
-  baseCcy: string
-  quoteCcy: string
 }

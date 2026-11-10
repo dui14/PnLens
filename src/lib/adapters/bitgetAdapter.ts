@@ -14,6 +14,8 @@ import {
 } from './credentialValidation'
 
 import { BITGET_BASE_URL as BASE_URL } from './exchangeBases'
+import { fetchExchange } from './httpClient'
+import { throwOnServerPage } from './exchangeWindowError'
 import {
   TradeRejectCounter,
   addDecimals,
@@ -43,7 +45,7 @@ async function fetchWithTimeout(url: string, options?: RequestInit): Promise<Res
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT)
   try {
-    return await fetch(url, { ...options, signal: controller.signal })
+    return await fetchExchange(url, { ...options, signal: controller.signal })
   } finally {
     clearTimeout(timer)
   }
@@ -104,7 +106,10 @@ export class BitgetAdapter implements ExchangeAdapter {
     return false
   }
 
-  async fetchTrades(credentials: ExchangeCredentials, since?: Date): Promise<ExchangeAdapterTrade[]> {
+  private scanEndMs = 0
+
+  async fetchTrades(credentials: ExchangeCredentials, since?: Date, until?: Date): Promise<ExchangeAdapterTrade[]> {
+    this.scanEndMs = until?.getTime() ?? Date.now()
     this.rejections.reset()
     const startTime = since ? since.getTime() : Date.now() - DEFAULT_LOOKBACK_MS
     const [spotTrades, futuresTrades] = await Promise.all([
@@ -132,7 +137,7 @@ export class BitgetAdapter implements ExchangeAdapter {
     startTime: number
   ): Promise<ExchangeAdapterTrade[] | null> {
     const allTrades: ExchangeAdapterTrade[] = []
-    const now = Date.now()
+    const now = this.scanEndMs
     let windowStart = startTime
 
     while (windowStart <= now) {
@@ -150,6 +155,7 @@ export class BitgetAdapter implements ExchangeAdapter {
         const path = `/api/v2/spot/trade/fills?${query.toString()}`
         const headers = this.buildHeaders(credentials, 'GET', path)
         const response = await fetchWithRetry(`${BASE_URL}${path}`, { headers })
+        throwOnServerPage(response)
         if (!response.ok) return null
 
         const data = (await response.json()) as {
@@ -188,7 +194,7 @@ export class BitgetAdapter implements ExchangeAdapter {
     startTime: number
   ): Promise<ExchangeAdapterTrade[]> {
     const allTrades: ExchangeAdapterTrade[] = []
-    const now = Date.now()
+    const now = this.scanEndMs
     const symbols = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'DOGEUSDT']
 
     for (const symbol of symbols) {
@@ -210,6 +216,7 @@ export class BitgetAdapter implements ExchangeAdapter {
           const path = `/api/v2/spot/trade/fills?${query.toString()}`
           const headers = this.buildHeaders(credentials, 'GET', path)
           const response = await fetchWithRetry(`${BASE_URL}${path}`, { headers })
+          throwOnServerPage(response)
           if (!response.ok) break
 
           const data = (await response.json()) as {
@@ -251,7 +258,7 @@ export class BitgetAdapter implements ExchangeAdapter {
     const recentTrades = await this.fetchRecentFuturesHistory(credentials, productTypes)
 
     const allTrades: ExchangeAdapterTrade[] = []
-    const now = Date.now()
+    const now = this.scanEndMs
     const historyStartTime = startTime
 
     for (const productType of productTypes) {
@@ -273,6 +280,7 @@ export class BitgetAdapter implements ExchangeAdapter {
           const path = `/api/v2/mix/order/fill-history?${query.toString()}`
           const headers = this.buildHeaders(credentials, 'GET', path)
           const response = await fetchWithRetry(`${BASE_URL}${path}`, { headers })
+          throwOnServerPage(response)
           if (!response.ok) break
 
           const data = (await response.json()) as {
@@ -330,7 +338,8 @@ export class BitgetAdapter implements ExchangeAdapter {
         const path = `/api/v2/mix/order/fill-history?${query.toString()}`
         const headers = this.buildHeaders(credentials, 'GET', path)
         const response = await fetchWithRetry(`${BASE_URL}${path}`, { headers })
-        if (!response.ok) break
+        throwOnServerPage(response)
+          if (!response.ok) break
 
         const data = (await response.json()) as {
           code: string
@@ -364,7 +373,7 @@ export class BitgetAdapter implements ExchangeAdapter {
     startTime: number
   ): Promise<ExchangeAdapterTrade[]> {
     const allTrades: ExchangeAdapterTrade[] = []
-    const now = Date.now()
+    const now = this.scanEndMs
     const historyStartTime = Math.max(startTime, now - BITGET_HISTORY_POSITION_LOOKBACK_MS)
     let lastEndId = ''
 
@@ -379,7 +388,8 @@ export class BitgetAdapter implements ExchangeAdapter {
       const path = `/api/v2/mix/position/history-position?${query.toString()}`
       const headers = this.buildHeaders(credentials, 'GET', path)
       const response = await fetchWithRetry(`${BASE_URL}${path}`, { headers })
-      if (!response.ok) break
+      throwOnServerPage(response)
+          if (!response.ok) break
 
       const data = (await response.json()) as {
         code: string

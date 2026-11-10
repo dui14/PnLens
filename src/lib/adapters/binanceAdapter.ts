@@ -14,6 +14,7 @@ import {
 } from './credentialValidation'
 import { BINANCE_BASE_URL as BASE_URL, BINANCE_FUTURES_BASE_URL as FUTURES_URL } from './exchangeBases'
 import { fetchExchange } from './httpClient'
+import { throwOnServerPage } from './exchangeWindowError'
 import {
   TradeRejectCounter,
   epochMillisToIso,
@@ -251,10 +252,14 @@ export class BinanceAdapter implements ExchangeAdapter {
     }
   }
 
+  private scanEndMs = 0
+
   async fetchTrades(
     credentials: ExchangeCredentials,
-    since?: Date
+    since?: Date,
+    until?: Date
   ): Promise<ExchangeAdapterTrade[]> {
+    this.scanEndMs = until?.getTime() ?? Date.now()
     this.rejections.reset()
     return this.withProxy(credentials, async () => {
       const [spotTrades, futuresTrades] = await Promise.all([
@@ -317,6 +322,7 @@ export class BinanceAdapter implements ExchangeAdapter {
     })
 
     if (!response.ok) {
+      throwOnServerPage(response)
       const err = (await response.json()) as { code?: number }
       if (err?.code === -1121) return []
       console.error(`[BinanceAdapter] fetchSpotTradesForSymbol failed for ${symbol}:`, err)
@@ -486,7 +492,7 @@ export class BinanceAdapter implements ExchangeAdapter {
   ): Promise<BinanceFuturesIncome[]> {
     const allRecords: BinanceFuturesIncome[] = []
     const dedup = new Set<string>()
-    const now = Date.now()
+    const now = this.scanEndMs
     let currentStart = Math.max(startTime, now - FUTURES_USER_TRADES_LOOKBACK_MS)
 
     while (currentStart < now) {
@@ -512,6 +518,7 @@ export class BinanceAdapter implements ExchangeAdapter {
           })
 
           if (!response.ok) {
+            throwOnServerPage(response)
             pageStart = endTime + 1
             continue
           }
@@ -559,7 +566,7 @@ export class BinanceAdapter implements ExchangeAdapter {
     startTime: number
   ): Promise<ExchangeAdapterTrade[]> {
     const allTrades: BinanceFuturesTrade[] = []
-    const now = Date.now()
+    const now = this.scanEndMs
     let windowStart = Math.max(startTime, now - FUTURES_USER_TRADES_LOOKBACK_MS)
 
     while (windowStart < now) {
@@ -579,6 +586,7 @@ export class BinanceAdapter implements ExchangeAdapter {
       })
 
       if (!response.ok) {
+        throwOnServerPage(response)
         const err = (await response.json()) as { code?: number }
         if (err?.code === -1121) return []
         if (err?.code === -4061) return []
@@ -622,6 +630,7 @@ export class BinanceAdapter implements ExchangeAdapter {
     })
 
     if (!response.ok) {
+      throwOnServerPage(response)
       const err = (await response.json()) as { code?: number }
       if (err?.code === -1121) return []
       if (err?.code === -4061) return []
