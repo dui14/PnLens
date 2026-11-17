@@ -1,5 +1,5 @@
 import { createHmac, createPublicKey, generateKeyPairSync, verify } from 'crypto'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
@@ -13,14 +13,25 @@ import { ConnectExchangeSchema, exchangeKeyErrorCode } from '@/lib/validators/ex
 
 const envPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../.env.local')
 
-function readPrivateKeyPem(filePath: string): string {
-  const text = readFileSync(filePath, 'utf8')
-  const match = text.match(/^PRIVATE_KEY="([\s\S]*?)"/m)
-  if (!match || match[1].trim().length === 0) {
-    throw new Error('PRIVATE_KEY missing')
-  }
+function readPrivateKeyPem(filePath: string): string | null {
+  if (!existsSync(filePath)) return null
+  const match = readFileSync(filePath, 'utf8').match(/^PRIVATE_KEY="([\s\S]*?)"/m)
+  if (!match || match[1].trim().length === 0) return null
   return match[1].replace(/\\n/g, '\n')
 }
+
+function generatedPem(type: 'rsa' | 'ed25519'): string {
+  const { privateKey } =
+    type === 'rsa' ? generateKeyPairSync('rsa', { modulusLength: 2048 }) : generateKeyPairSync('ed25519')
+  return privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()
+}
+
+const envPem = readPrivateKeyPem(envPath)
+const keySources: Array<[string, string]> = [
+  ['generated ed25519', generatedPem('ed25519')],
+  ['generated rsa', generatedPem('rsa')],
+  ...(envPem ? ([['env PRIVATE_KEY', envPem]] as Array<[string, string]>) : []),
+]
 
 function verifies(signature: string, payload: string, pem: string, algorithm: 'rsa' | 'ed25519'): boolean {
   const publicKey = createPublicKey(normalizePrivateKeyPem(pem).key)
@@ -32,11 +43,11 @@ function verifies(signature: string, payload: string, pem: string, algorithm: 'r
   )
 }
 
-const venues = ['binance', 'bybit', 'bitget'] as const
+const allVenues = ['binance', 'bybit', 'bitget'] as const
 
-describe('PEM private key pipeline', () => {
-  const pem = readPrivateKeyPem(envPath)
+describe.each(keySources)('PEM private key pipeline (%s)', (_label, pem) => {
   const normalized = normalizePrivateKeyPem(pem)
+  const venues = normalized.algorithm === 'ed25519' ? (['binance'] as const) : allVenues
 
   it('strips PEM armor and whitespace, then decodes DER', () => {
     expect(normalized.base64.includes('BEGIN')).toBe(false)
