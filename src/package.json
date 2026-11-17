@@ -1,5 +1,5 @@
 {
-  "name": "track-pnl-pro",
+  "name": "pnlens",
   "version": "0.1.0",
   "private": true,
   "packageManager": "pnpm@10.30.3",
@@ -12,6 +12,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "analyze": "cross-env ANALYZE=true next build",
     "start": "next start",
     "lint": "next lint",
     "test": "vitest run",
@@ -24,10 +25,12 @@
     "@supabase/ssr": "^0.6.1",
     "@supabase/supabase-js": "^2.49.1",
     "@tanstack/react-query": "^5.66.0",
+    "lightweight-charts": "5.3.0",
     "lucide-react": "^0.469.0",
     "next": "^15.2.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "react-easy-crop": "6.2.5",
     "react-hook-form": "^7.54.2",
     "react-markdown": "^10.1.0",
     "recharts": "^2.15.0",
@@ -36,11 +39,13 @@
     "zustand": "^5.0.3"
   },
   "devDependencies": {
+    "@next/bundle-analyzer": "^16.4.6",
     "@types/node": "^22.10.0",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
     "@vitest/coverage-v8": "^5.1.0",
     "autoprefixer": "^10.4.20",
+    "cross-env": "^10.1.0",
     "eslint": "^9.18.0",
     "eslint-config-next": "^15.2.0",
     "postcss": "^8.5.1",

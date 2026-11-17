@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { BinanceAdapter } from '@/lib/adapters/binanceAdapter'
-import { credentials, installFastSleep, jsonResponse, recentSince } from './support/http'
+import { credentials as hmacCredentials, installFastSleep, jsonResponse, recentSince, testPrivateKeyPem } from './support/http'
+
+const credentials = { ...hmacCredentials, apiSecret: testPrivateKeyPem }
 
 const http = vi.hoisted(() => {
   return {
@@ -70,7 +72,7 @@ describe('BinanceAdapter', () => {
       return defaultRoute(url)
     }
 
-    const trades = await new BinanceAdapter().fetchTrades(credentials, recentSince())
+    const trades = await new BinanceAdapter().fetchTrades(credentials, new Date(spotTime - 1000))
     const spot = trades.find((trade) => trade.external_trade_id === 'spot_42')
     const futures = trades.find((trade) => trade.external_trade_id === 'futures_7')
 
@@ -97,6 +99,34 @@ describe('BinanceAdapter', () => {
     })
     expect(JSON.stringify(trades).includes(credentials.apiSecret)).toBe(false)
     expect(JSON.stringify(trades).includes('signature=')).toBe(false)
+  })
+
+  it('queries and keeps a held bStock spot pair', async () => {
+    const requested: string[] = []
+    http.handler = (url) => {
+      if (url.includes('/api/v3/account')) {
+        return jsonResponse({ balances: [{ asset: 'NVDAB', free: '2.5', locked: '0' }] })
+      }
+      if (url.includes('/api/v3/myTrades')) {
+        const symbol = new URL(url).searchParams.get('symbol') ?? ''
+        requested.push(symbol)
+        if (symbol === 'NVDABUSDT') {
+          return jsonResponse([{ ...spotTrade(9), symbol: 'NVDABUSDT', price: '188.40', qty: '2.5' }])
+        }
+      }
+      return defaultRoute(url)
+    }
+
+    const trades = await new BinanceAdapter().fetchTrades(credentials, new Date(spotTime - 1000))
+
+    expect(requested).toContain('NVDABUSDT')
+    expect(trades.find((trade) => trade.external_trade_id === 'spot_9')).toMatchObject({
+      symbol: 'NVDABUSDT',
+      side: 'buy',
+      quantity: '2.5',
+      price: '188.40',
+      trade_type: 'spot',
+    })
   })
 
   it('drops a zero position and maps long and short position amounts', async () => {
@@ -191,9 +221,43 @@ describe('BinanceAdapter', () => {
       return defaultRoute(url)
     }
 
-    const trades = await new BinanceAdapter().fetchTrades(credentials, recentSince())
+    const trades = await new BinanceAdapter().fetchTrades(credentials, new Date(spotTime - 1000))
     expect(attempts).toBeGreaterThanOrEqual(2)
     expect(trades.some((trade) => trade.external_trade_id === 'spot_42')).toBe(true)
+  })
+
+  it('retries a rate-limited futures window using Retry-After and keeps all rows', async () => {
+    let attempts = 0
+    http.handler = (url) => {
+      if (url.includes('/fapi/v1/userTrades') && url.includes('symbol=BTCUSDT') && url.includes('startTime=')) {
+        attempts += 1
+        if (attempts === 1) {
+          return new Response(JSON.stringify({ code: -1003, msg: 'Too many requests' }), {
+            status: 429,
+            headers: { 'content-type': 'application/json', 'retry-after': '1' },
+          })
+        }
+      }
+      return defaultRoute(url)
+    }
+
+    const adapter = new BinanceAdapter()
+    await adapter.fetchTrades(credentials, recentSince())
+    expect(attempts).toBeGreaterThanOrEqual(2)
+    expect(adapter.historyGaps().filter((gap) => gap.market === 'futures')).toHaveLength(0)
+  })
+
+  it('records a history gap when a futures window stays rate limited', async () => {
+    http.handler = (url) => {
+      if (url.includes('/fapi/v1/userTrades') && url.includes('symbol=BTCUSDT') && url.includes('startTime=')) {
+        return jsonResponse({ code: -1003, msg: 'Too many requests' }, 418)
+      }
+      return defaultRoute(url)
+    }
+
+    const adapter = new BinanceAdapter()
+    await adapter.fetchTrades(credentials, recentSince())
+    expect(adapter.historyGaps().some((gap) => gap.market === 'futures')).toBe(true)
   })
 
   it('keeps one spot fill when the same id is returned twice', async () => {
@@ -204,7 +268,7 @@ describe('BinanceAdapter', () => {
       return defaultRoute(url)
     }
 
-    const trades = await new BinanceAdapter().fetchTrades(credentials, recentSince())
+    const trades = await new BinanceAdapter().fetchTrades(credentials, new Date(spotTime - 1000))
     expect(trades.filter((trade) => trade.external_trade_id === 'spot_42')).toHaveLength(1)
   })
 
@@ -280,5 +344,112 @@ describe('BinanceAdapter', () => {
     expect(calls.length).toBeGreaterThanOrEqual(3)
     expect(trades.filter((trade) => trade.income_type === 'REALIZED_PNL')).toHaveLength(2001)
     expect(JSON.stringify(calls).includes(credentials.apiSecret)).toBe(false)
+  })
+
+  describe('spot symbol discovery', () => {
+    const catalog = {
+      symbols: [
+        { symbol: 'NVDABUSDT', baseAsset: 'NVDAB', quoteAsset: 'USDT', status: 'TRADING' },
+        { symbol: 'NVDABFDUSD', baseAsset: 'NVDAB', quoteAsset: 'FDUSD', status: 'TRADING' },
+        { symbol: 'OLDUSDT', baseAsset: 'OLD', quoteAsset: 'USDT', status: 'BREAK' },
+        { symbol: 'OLDETH', baseAsset: 'OLD', quoteAsset: 'ETH', status: 'BREAK' },
+        { symbol: 'DUSTUSDC', baseAsset: 'DUST', quoteAsset: 'USDC', status: 'TRADING' },
+        { symbol: 'CVTBTC', baseAsset: 'CVT', quoteAsset: 'BTC', status: 'TRADING' },
+        { symbol: 'DEPUSDT', baseAsset: 'DEP', quoteAsset: 'USDT', status: 'TRADING' },
+        { symbol: 'WDRUSDT', baseAsset: 'WDR', quoteAsset: 'USDT', status: 'TRADING' },
+        { symbol: 'AAPLBUSDT', baseAsset: 'AAPLB', quoteAsset: 'USDT', status: 'TRADING' },
+      ],
+    }
+    const coins = [
+      { coin: 'NVDAB', name: 'NVIDIA (bStocks)' },
+      { coin: 'AAPLB', name: 'Apple (bStocks)' },
+      { coin: 'BTC', name: 'Bitcoin' },
+    ]
+
+    function discoveryRoute(requested: string[], overrides: (url: string) => Response | null = () => null) {
+      return (url: string): Response => {
+        const custom = overrides(url)
+        if (custom) return custom
+        if (url.includes('/api/v3/exchangeInfo')) return jsonResponse(catalog)
+        if (url.includes('/sapi/v1/capital/config/getall')) return jsonResponse(coins)
+        if (url.includes('/sapi/v1/capital/deposit/hisrec')) return jsonResponse([{ coin: 'DEP' }])
+        if (url.includes('/sapi/v1/capital/withdraw/history')) return jsonResponse([{ coin: 'WDR' }])
+        if (url.includes('/sapi/v1/convert/tradeFlow')) {
+          return jsonResponse({ list: [{ fromAsset: 'USDT', toAsset: 'CVT' }], moreData: false })
+        }
+        if (url.includes('/sapi/v1/asset/dribblet')) {
+          return jsonResponse({ userAssetDribblets: [{ userAssetDribbletDetails: [{ fromAsset: 'DUST' }] }] })
+        }
+        if (url.includes('/api/v3/myTrades')) {
+          requested.push(new URL(url).searchParams.get('symbol') ?? '')
+          return jsonResponse([])
+        }
+        return defaultRoute(url)
+      }
+    }
+
+    it('scans stored symbols even when the balance is zero', async () => {
+      const requested: string[] = []
+      http.handler = discoveryRoute(requested)
+      const adapter = new BinanceAdapter()
+      adapter.setKnownSpotSymbols(['OLDUSDT'])
+      await adapter.fetchTrades(credentials, recentSince())
+      expect(requested).toContain('OLDUSDT')
+      expect(adapter.spotDiscoveryStats().known).toBe(1)
+    })
+
+    it('expands deposit, withdraw, convert and dust assets to listed pairs including BREAK ones', async () => {
+      const requested: string[] = []
+      http.handler = discoveryRoute(requested)
+      const adapter = new BinanceAdapter()
+      adapter.setKnownSpotSymbols(['SEEDUSDT'])
+      await adapter.fetchTrades(credentials, recentSince())
+      expect(requested).toEqual(expect.arrayContaining(['DEPUSDT', 'WDRUSDT', 'CVTBTC', 'DUSTUSDC']))
+      expect(requested).not.toContain('OLDETH')
+      expect(adapter.spotDiscoveryStats().history).toBe(4)
+    })
+
+    it('scans bStock pairs on the first scan only', async () => {
+      const first: string[] = []
+      http.handler = discoveryRoute(first)
+      const firstAdapter = new BinanceAdapter()
+      firstAdapter.setKnownSpotSymbols([])
+      await firstAdapter.fetchTrades(credentials, recentSince())
+      expect(first).toEqual(expect.arrayContaining(['NVDABUSDT', 'NVDABFDUSD', 'AAPLBUSDT']))
+      expect(first).not.toContain('OLDUSDT')
+      expect(firstAdapter.spotDiscoveryStats().bStock).toBe(3)
+
+      const later: string[] = []
+      http.handler = discoveryRoute(later)
+      const laterAdapter = new BinanceAdapter()
+      laterAdapter.setKnownSpotSymbols(['BTCUSDT'])
+      await laterAdapter.fetchTrades(credentials, recentSince())
+      expect(later).not.toContain('NVDABUSDT')
+      expect(later).not.toContain('AAPLBUSDT')
+    })
+
+    it('finishes the scan without a gap when every optional discovery endpoint fails', async () => {
+      const requested: string[] = []
+      http.handler = discoveryRoute(requested, (url) =>
+        url.includes('/sapi/') && !url.includes('getall') ? jsonResponse({ code: -2015, msg: 'denied' }, 401) : null
+      )
+      const adapter = new BinanceAdapter()
+      adapter.setKnownSpotSymbols(['OLDUSDT'])
+      const trades = await adapter.fetchTrades(credentials, recentSince())
+      expect(Array.isArray(trades)).toBe(true)
+      expect(requested).toContain('OLDUSDT')
+      expect(adapter.historyGaps()).toEqual([])
+    })
+
+    it('records a gap only when exchangeInfo fails', async () => {
+      const requested: string[] = []
+      http.handler = discoveryRoute(requested, (url) =>
+        url.includes('/api/v3/exchangeInfo') ? jsonResponse({ code: -1000 }, 500) : null
+      )
+      const adapter = new BinanceAdapter()
+      adapter.setKnownSpotSymbols(['OLDUSDT'])
+      await adapter.fetchTrades(credentials, recentSince())
+      expect(adapter.historyGaps().map((gap) => gap.market)).toEqual(['spot_discovery'])
+    })
   })
 })

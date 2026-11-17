@@ -1,68 +1,56 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
-import type { ExchangeAccount, Exchange } from '@/lib/types'
+import { useState, useEffect, useCallback, useRef } from 'react'
+import { useT } from '@/lib/i18n/client'
+import { fillTemplate } from '@/lib/i18n/format'
+import type { Dictionary } from '@/lib/i18n'
+import { latestAvailableAt } from '@/lib/cooldown/cooldown'
+import { useCooldown } from '@/lib/hooks/useCooldown'
+import { EXCHANGES } from '@/lib/types'
+import type { ExchangeAccount, ExchangeAccountWithStats, Exchange } from '@/lib/types'
+import { EXCHANGE_BRANDING } from '@/lib/exchangeBranding'
+import { ExchangeLogo } from '@/components/ui/ExchangeLogo'
+import { SCAN_POLL_INTERVAL_MS, SCAN_POLL_MAX_WAIT_MS } from '@/lib/scan/scanLimits'
 
 type ModalMode = 'connect' | 'edit'
+type SyncNotice = { kind: 'success' | 'error'; text: string }
+
+function syncErrorMessage(
+  syncError: string | null,
+  messages: Record<string, string>,
+  fallback: string
+): string {
+  const head = (syncError ?? '').split(',')[0] ?? ''
+  const code = head.split(':')[0] ?? ''
+  return messages[code] ?? fallback
+}
+
 type ModalStep = 1 | 2 | 3
 
-const EXCHANGE_OPTIONS: {
-  id: Exchange
-  name: string
-  bgClass: string
-  textClass: string
-  abbr: string
-}[] = [
-  { id: 'binance', name: 'Binance', bgClass: 'bg-yellow-400', textClass: 'text-slate-900', abbr: 'B' },
-  { id: 'okx', name: 'OKX', bgClass: 'bg-slate-900 dark:bg-slate-700', textClass: 'text-white', abbr: 'OKX' },
-  { id: 'bybit', name: 'Bybit', bgClass: 'bg-orange-500', textClass: 'text-white', abbr: 'BB' },
-  { id: 'bitget', name: 'Bitget', bgClass: 'bg-cyan-500', textClass: 'text-white', abbr: 'BG' },
-  { id: 'gateio', name: 'Gate.io', bgClass: 'bg-emerald-600', textClass: 'text-white', abbr: 'G' },
-]
+const EXCHANGE_OPTIONS = EXCHANGES.map((id) => ({ id, name: EXCHANGE_BRANDING[id].name }))
 
-function ExchangeLogo({ exchange }: { exchange: string }) {
-  const brand = EXCHANGE_OPTIONS.find((e) => e.id === exchange)
-  return (
-    <div
-      className={`size-12 rounded-xl ${brand?.bgClass ?? 'bg-slate-500'} ${brand?.textClass ?? 'text-white'} flex items-center justify-center font-black text-sm tracking-tight`}
-    >
-      {brand?.abbr ?? exchange.slice(0, 2).toUpperCase()}
-    </div>
-  )
-}
-
-function ExchangeLogoSmall({ exchange }: { exchange: string }) {
-  const brand = EXCHANGE_OPTIONS.find((e) => e.id === exchange)
-  return (
-    <div
-      className={`size-9 rounded-lg ${brand?.bgClass ?? 'bg-slate-500'} ${brand?.textClass ?? 'text-white'} flex items-center justify-center font-black text-xs tracking-tight`}
-    >
-      {brand?.abbr ?? exchange.slice(0, 2).toUpperCase()}
-    </div>
-  )
-}
-
-function formatLastSynced(lastSynced: string | null): string {
-  if (!lastSynced) return 'Never synced'
+function formatLastSynced(lastSynced: string | null, labels: Dictionary['exchange']): string {
+  if (!lastSynced) return labels.neverSynced
   const diff = Date.now() - new Date(lastSynced).getTime()
   const minutes = Math.floor(diff / 60000)
-  if (minutes < 1) return 'Just now'
-  if (minutes < 60) return `${minutes}m ago`
+  if (minutes < 1) return labels.justNow
+  if (minutes < 60) return fillTemplate(labels.minutesAgo, { count: minutes })
   const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours}h ago`
-  return `${Math.floor(hours / 24)}d ago`
+  if (hours < 24) return fillTemplate(labels.hoursAgo, { count: hours })
+  return fillTemplate(labels.daysAgo, { count: Math.floor(hours / 24) })
 }
 
 function EmptyState({ onConnect }: { onConnect: () => void }) {
+  const { t } = useT()
   return (
     <div className="flex flex-col items-center justify-center py-24 gap-6">
       <div className="flex items-center justify-center size-20 rounded-2xl bg-primary/10 text-primary">
         <span className="material-symbols-outlined text-5xl">account_balance_wallet</span>
       </div>
       <div className="flex flex-col items-center gap-2 text-center">
-        <h2 className="text-slate-900 dark:text-slate-100 text-2xl font-black">No exchanges connected</h2>
+        <h2 className="text-slate-900 dark:text-slate-100 text-2xl font-black">{t.exchange.emptyTitle}</h2>
         <p className="text-slate-500 dark:text-slate-400 text-sm max-w-sm">
-          Connect your first exchange to start tracking your portfolio, syncing trades and calculating PnL.
+          {t.exchange.emptyDescription}
         </p>
       </div>
       <button
@@ -70,7 +58,7 @@ function EmptyState({ onConnect }: { onConnect: () => void }) {
         className="flex items-center gap-2 rounded-xl h-12 px-8 bg-primary text-accent font-bold text-sm shadow-lg shadow-primary/20 hover:scale-[1.02] active:scale-[0.98] transition-all"
       >
         <span className="material-symbols-outlined text-[18px]">add</span>
-        Connect Your First Exchange
+        {t.exchange.connectFirst}
       </button>
     </div>
   )
@@ -117,15 +105,21 @@ function ExchangeCard({
   onDelete,
   isSyncing,
   isDeleting,
+  notice,
+  retryAt,
 }: {
-  account: ExchangeAccount
+  account: ExchangeAccountWithStats
   onToggleActive: (account: ExchangeAccount) => Promise<void>
   onSync: (account: ExchangeAccount) => Promise<void>
   onEdit: (account: ExchangeAccount) => void
   onDelete: (account: ExchangeAccount) => void
   isSyncing: boolean
   isDeleting: boolean
+  notice: SyncNotice | undefined
+  retryAt: string | undefined
 }) {
+  const { t } = useT()
+  const cooldown = useCooldown(latestAvailableAt(account.syncAvailableAt, retryAt))
   const exchangeName = EXCHANGE_OPTIONS.find((e) => e.id === account.exchange)?.name ?? account.exchange
   const displayName = account.label ?? exchangeName
 
@@ -133,7 +127,7 @@ function ExchangeCard({
     <div className="flex flex-col gap-4 rounded-2xl border border-slate-200 dark:border-primary/20 bg-white dark:bg-[#201f23] p-6 shadow-sm hover:shadow-md transition-shadow">
       <div className="flex justify-between items-start">
         <div className="flex items-center gap-4">
-          <ExchangeLogo exchange={account.exchange} />
+          <ExchangeLogo exchange={account.exchange} size={48} />
           <div className="flex flex-col">
             <h3 className="text-slate-900 dark:text-slate-100 font-bold text-lg leading-tight">{displayName}</h3>
             {account.label && (
@@ -147,7 +141,7 @@ function ExchangeCard({
               <span
                 className={`size-2 rounded-full ${account.is_active ? 'bg-emerald-500' : 'bg-slate-400'}`}
               />
-              {account.is_active ? 'Active' : 'Inactive'}
+              {account.is_active ? t.exchange.active : t.exchange.inactive}
             </div>
           </div>
         </div>
@@ -164,20 +158,33 @@ function ExchangeCard({
 
       <div className="py-4 border-y border-slate-100 dark:border-primary/10 flex flex-col gap-1">
         <p className="text-slate-500 dark:text-slate-400 text-xs font-medium uppercase tracking-widest">
-          Last Synced
+          {t.exchange.lastSynced}
         </p>
         <p className="text-slate-900 dark:text-slate-100 text-lg font-bold">
-          {formatLastSynced(account.last_synced)}
+          {formatLastSynced(account.last_synced, t.exchange)}
         </p>
         <p className="text-slate-400 dark:text-slate-500 text-xs mt-0.5">
-          Connected {formatLastSynced(account.created_at)}
+          {fillTemplate(t.exchange.connectedAgo, { time: formatLastSynced(account.created_at, t.exchange) })}
         </p>
+        {account.secret_format && (
+          <p className="flex items-center gap-1 text-slate-500 dark:text-slate-400 text-xs mt-1">
+            <span className="material-symbols-outlined text-[14px]">key</span>
+            {t.exchange.secretFormats[account.secret_format]}
+          </p>
+        )}
+        {notice && !isSyncing && (
+          <p
+            className={`text-xs mt-1 ${notice.kind === 'error' ? 'text-rose-500' : 'text-emerald-500'}`}
+          >
+            {notice.text}
+          </p>
+        )}
       </div>
 
       <div className="flex gap-2 pt-1">
         <button
           onClick={() => onSync(account)}
-          disabled={isSyncing || !account.is_active}
+          disabled={isSyncing || !account.is_active || cooldown.active}
           className="flex-1 flex items-center justify-center gap-2 rounded-lg bg-primary/10 dark:bg-primary/20 text-primary dark:text-slate-100 h-10 text-sm font-bold hover:bg-primary hover:text-accent transition-all disabled:opacity-40 disabled:cursor-not-allowed"
         >
           <span
@@ -185,7 +192,11 @@ function ExchangeCard({
           >
             sync
           </span>
-          {isSyncing ? 'Syncing...' : 'Sync Now'}
+          {isSyncing
+            ? t.exchange.syncing
+            : cooldown.active
+              ? fillTemplate(t.exchange.syncAvailableIn, { time: cooldown.label })
+              : t.exchange.syncNow}
         </button>
         <button
           onClick={() => onEdit(account)}
@@ -254,18 +265,25 @@ function ConnectModal({
   onBack: () => void
   onClose: () => void
 }) {
+  const { t } = useT()
+  const ex = t.exchange
   const isEdit = mode === 'edit'
   const selectedExchangeName =
     EXCHANGE_OPTIONS.find((e) => e.id === selectedExchange)?.name ?? selectedExchange ?? ''
 
   const requiresPassphrase = selectedExchange === 'okx' || selectedExchange === 'bitget'
+  const requiresPrivateKey = selectedExchange === 'binance' || selectedExchange === 'bybit' || selectedExchange === 'bitget'
+  const requiresSecret = selectedExchange === 'okx' || selectedExchange === 'gateio'
   const supportsProxy = selectedExchange === 'binance' || selectedExchange === 'bybit'
 
   const canNext =
     step === 1
       ? !!selectedExchange
       : step === 2
-      ? apiKey.trim().length > 0 && apiSecret.trim().length > 0 && (!requiresPassphrase || passphrase.trim().length > 0)
+      ? apiKey.trim().length > 0 &&
+        (!requiresPrivateKey || apiSecret.includes('BEGIN ')) &&
+        (!requiresSecret || apiSecret.trim().length > 0) &&
+        (!requiresPassphrase || passphrase.trim().length > 0)
       : true
 
   return (
@@ -277,7 +295,7 @@ function ConnectModal({
         <div className="flex items-center justify-between border-b border-slate-200 dark:border-primary/20 px-6 py-5 flex-shrink-0">
           <div className="flex items-center gap-3">
             {selectedExchange && step > 1 ? (
-              <ExchangeLogoSmall exchange={selectedExchange} />
+              <ExchangeLogo exchange={selectedExchange} size={36} />
             ) : (
               <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary text-accent">
                 <span className="material-symbols-outlined text-[20px]">account_balance_wallet</span>
@@ -285,14 +303,16 @@ function ConnectModal({
             )}
             <div>
               <h2 className="text-base font-bold tracking-tight text-slate-900 dark:text-slate-100">
-                {isEdit ? `Update ${selectedExchangeName} Keys` : 'Connect Exchange'}
+                {isEdit
+                  ? fillTemplate(ex.updateKeysTitle, { exchange: selectedExchangeName })
+                  : ex.connectTitle}
               </h2>
               <p className="text-xs text-slate-500 dark:text-slate-400">
                 {step === 1
-                  ? 'Choose a provider'
+                  ? ex.stepChoose
                   : step === 2
-                  ? 'Enter your API credentials'
-                  : 'Successfully connected'}
+                  ? ex.stepCredentials
+                  : ex.stepConnected}
               </p>
             </div>
           </div>
@@ -307,9 +327,9 @@ function ConnectModal({
         {!isEdit && (
           <div className="px-6 py-3 bg-slate-50 dark:bg-primary/5 border-b border-slate-200 dark:border-primary/10 flex items-center gap-2 flex-shrink-0">
             {[
-              { num: 1, label: 'Select Exchange' },
-              { num: 2, label: 'API Keys' },
-              { num: 3, label: 'Done' },
+              { num: 1, label: ex.wizardSteps.select },
+              { num: 2, label: ex.wizardSteps.keys },
+              { num: 3, label: ex.wizardSteps.done },
             ].map((s, i) => (
               <div key={s.num} className="flex items-center gap-1.5">
                 {i > 0 && (
@@ -360,11 +380,7 @@ function ConnectModal({
                         : 'border-slate-200 dark:border-slate-800 hover:border-primary/50 bg-white dark:bg-slate-900/50 cursor-pointer'
                     }`}
                   >
-                    <div
-                      className={`size-12 rounded-xl ${exchange.bgClass} ${exchange.textClass} flex items-center justify-center font-black text-sm`}
-                    >
-                      {exchange.abbr}
-                    </div>
+                    <ExchangeLogo exchange={exchange.id} size={48} className="rounded-xl" />
                     <div className="text-center">
                       <p className="font-bold text-slate-900 dark:text-white text-sm">{exchange.name}</p>
                       <p
@@ -372,7 +388,7 @@ function ConnectModal({
                           alreadyConnected ? 'text-emerald-500' : 'text-slate-400'
                         }`}
                       >
-                        {alreadyConnected ? 'Connected' : 'Available'}
+                        {alreadyConnected ? ex.connected : ex.available}
                       </p>
                     </div>
                   </button>
@@ -391,55 +407,78 @@ function ConnectModal({
               )}
               <div className="flex flex-col gap-1.5">
                 <label className="text-sm font-semibold text-slate-700 dark:text-slate-300">
-                  Account Label <span className="text-slate-400 font-normal">(optional)</span>
+                  {ex.accountLabel} <span className="text-slate-400 font-normal">{ex.optional}</span>
                 </label>
                 <input
                   type="text"
                   value={label}
                   onChange={(e) => onLabelChange(e.target.value)}
-                  placeholder={`e.g. My ${selectedExchangeName} Main`}
+                  placeholder={fillTemplate(ex.labelPlaceholder, { exchange: selectedExchangeName })}
                   maxLength={100}
                   className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 py-2.5 text-sm focus:ring-2 focus:ring-primary focus:border-primary transition-all outline-none text-slate-900 dark:text-slate-100 placeholder:text-slate-400"
                 />
               </div>
               <div className="flex flex-col gap-1.5">
                 <label className="text-sm font-semibold text-slate-700 dark:text-slate-300">
-                  API Key <span className="text-red-500">*</span>
+                  {ex.apiKey} <span className="text-red-500">*</span>
                 </label>
                 <input
                   type="text"
                   value={apiKey}
                   onChange={(e) => onApiKeyChange(e.target.value)}
-                  placeholder="Paste your API key here"
+                  placeholder={ex.apiKeyPlaceholder}
                   autoComplete="off"
                   spellCheck={false}
                   className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 py-2.5 text-sm font-mono focus:ring-2 focus:ring-primary focus:border-primary transition-all outline-none text-slate-900 dark:text-slate-100 placeholder:text-slate-400"
                 />
               </div>
-              <div className="flex flex-col gap-1.5">
-                <label className="text-sm font-semibold text-slate-700 dark:text-slate-300">
-                  API Secret <span className="text-red-500">*</span>
-                </label>
-                <input
-                  type="password"
-                  value={apiSecret}
-                  onChange={(e) => onApiSecretChange(e.target.value)}
-                  placeholder="Paste your API secret here"
-                  autoComplete="new-password"
-                  spellCheck={false}
-                  className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 py-2.5 text-sm font-mono focus:ring-2 focus:ring-primary focus:border-primary transition-all outline-none text-slate-900 dark:text-slate-100 placeholder:text-slate-400"
-                />
-              </div>
+              {requiresPrivateKey && (
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-sm font-semibold text-slate-700 dark:text-slate-300">
+                    {ex.privateKey} <span className="text-red-500">*</span>
+                  </label>
+                  <textarea
+                    value={apiSecret}
+                    onChange={(e) => onApiSecretChange(e.target.value)}
+                    placeholder="-----BEGIN PRIVATE KEY-----"
+                    rows={6}
+                    spellCheck={false}
+                    className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 py-2.5 text-xs font-mono focus:ring-2 focus:ring-primary focus:border-primary transition-all outline-none text-slate-900 dark:text-slate-100 placeholder:text-slate-400"
+                  />
+                  {selectedExchange && ex.privateKeyHints[selectedExchange as keyof typeof ex.privateKeyHints] && (
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                      {ex.privateKeyHints[selectedExchange as keyof typeof ex.privateKeyHints]}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {requiresSecret && (
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-sm font-semibold text-slate-700 dark:text-slate-300">
+                    {ex.apiSecret} <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="password"
+                    value={apiSecret}
+                    onChange={(e) => onApiSecretChange(e.target.value)}
+                    placeholder={ex.apiSecretPlaceholder}
+                    autoComplete="new-password"
+                    spellCheck={false}
+                    className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 py-2.5 text-sm font-mono focus:ring-2 focus:ring-primary focus:border-primary transition-all outline-none text-slate-900 dark:text-slate-100 placeholder:text-slate-400"
+                  />
+                </div>
+              )}
               {requiresPassphrase && (
                 <div className="flex flex-col gap-1.5">
                   <label className="text-sm font-semibold text-slate-700 dark:text-slate-300">
-                    Passphrase <span className="text-red-500">*</span>
+                    {ex.passphrase} <span className="text-red-500">*</span>
                   </label>
                   <input
                     type="password"
                     value={passphrase}
                     onChange={(e) => onPassphraseChange(e.target.value)}
-                    placeholder="Paste your exchange passphrase"
+                    placeholder={ex.passphrasePlaceholder}
                     autoComplete="new-password"
                     spellCheck={false}
                     className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 py-2.5 text-sm font-mono focus:ring-2 focus:ring-primary focus:border-primary transition-all outline-none text-slate-900 dark:text-slate-100 placeholder:text-slate-400"
@@ -450,9 +489,9 @@ function ConnectModal({
                 <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 p-3 flex flex-col gap-3">
                   <div className="flex items-center justify-between gap-3">
                     <div className="flex flex-col gap-0.5">
-                      <p className="text-sm font-semibold text-slate-700 dark:text-slate-300">Use Proxy</p>
+                      <p className="text-sm font-semibold text-slate-700 dark:text-slate-300">{ex.useProxy}</p>
                       <p className="text-xs text-slate-500 dark:text-slate-400">
-                        Enable if your production server region is blocked by exchange.
+                        {ex.proxyHint}
                       </p>
                     </div>
                     <label className="relative inline-flex items-center cursor-pointer group flex-shrink-0">
@@ -467,12 +506,12 @@ function ConnectModal({
                   </div>
                   {proxyEnabled && (
                     <div className="flex flex-col gap-1.5">
-                      <label className="text-sm font-semibold text-slate-700 dark:text-slate-300">Proxy</label>
+                      <label className="text-sm font-semibold text-slate-700 dark:text-slate-300">{ex.proxy}</label>
                       <input
                         type="text"
                         value={proxyValue}
                         onChange={(event) => onProxyValueChange(event.target.value)}
-                        placeholder="host:port:user:pass or http://user:pass@host:port"
+                        placeholder={ex.proxyPlaceholder}
                         autoComplete="off"
                         spellCheck={false}
                         className="w-full rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2.5 text-sm font-mono focus:ring-2 focus:ring-primary focus:border-primary transition-all outline-none text-slate-900 dark:text-slate-100 placeholder:text-slate-400"
@@ -484,8 +523,7 @@ function ConnectModal({
               <div className="rounded-lg bg-amber-500/10 border border-amber-500/20 p-3 flex gap-2 text-amber-600 dark:text-amber-400">
                 <span className="material-symbols-outlined text-[16px] flex-shrink-0 mt-0.5">shield_lock</span>
                 <p className="text-xs">
-                  Use <strong>read-only</strong> API keys. Never grant withdrawal permissions.
-                  Keys are encrypted with AES-256-GCM.
+                  {ex.readOnlyNotice}
                 </p>
               </div>
             </div>
@@ -498,12 +536,12 @@ function ConnectModal({
               </div>
               <div>
                 <h3 className="text-xl font-bold text-slate-900 dark:text-slate-100 mb-1">
-                  {isEdit ? 'Keys Updated' : 'Connection Verified'}
+                  {isEdit ? ex.keysUpdated : ex.connectionVerified}
                 </h3>
                 <p className="text-slate-500 dark:text-slate-400 text-sm">
                   {isEdit
-                    ? `Your ${selectedExchangeName} API keys have been updated successfully.`
-                    : `Your ${selectedExchangeName} account has been successfully connected.`}
+                    ? fillTemplate(ex.keysUpdatedBody, { exchange: selectedExchangeName })
+                    : fillTemplate(ex.connectedBody, { exchange: selectedExchangeName })}
                 </p>
                 {submitError && (
                   <p className="text-slate-500 dark:text-slate-400 text-sm max-w-sm mt-2">{submitError}</p>
@@ -518,7 +556,7 @@ function ConnectModal({
             onClick={onBack}
             className="px-5 py-2 rounded-lg font-semibold text-sm text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-800 transition-colors"
           >
-            {step === 3 ? 'Close' : step === 1 || isEdit ? 'Cancel' : 'Back'}
+            {step === 3 ? ex.close : step === 1 || isEdit ? ex.cancel : ex.back}
           </button>
           {step !== 3 && (
             <button
@@ -531,16 +569,16 @@ function ConnectModal({
                   <span className="material-symbols-outlined text-[16px] animate-spin">
                     progress_activity
                   </span>
-                  Connecting...
+                  {ex.connecting}
                 </>
               ) : step === 2 ? (
                 <>
                   <span className="material-symbols-outlined text-[16px]">verified</span>
-                  {isEdit ? 'Update Keys' : 'Connect'}
+                  {isEdit ? ex.updateKeys : ex.connect}
                 </>
               ) : (
                 <>
-                  Next
+                  {ex.next}
                   <span className="material-symbols-outlined text-[16px]">arrow_forward</span>
                 </>
               )}
@@ -561,6 +599,7 @@ function ConfirmDeleteModal({
   onConfirm: () => void
   onCancel: () => void
 }) {
+  const { t } = useT()
   const exchangeName = EXCHANGE_OPTIONS.find((e) => e.id === account.exchange)?.name ?? account.exchange
   const displayName = account.label ?? exchangeName
 
@@ -572,27 +611,28 @@ function ConfirmDeleteModal({
             <span className="material-symbols-outlined text-[22px]">delete_forever</span>
           </div>
           <div>
-            <h3 className="font-bold text-slate-900 dark:text-slate-100">Remove Exchange</h3>
-            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">This action cannot be undone.</p>
+            <h3 className="font-bold text-slate-900 dark:text-slate-100">{t.exchange.removeTitle}</h3>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{t.exchange.cannotUndo}</p>
           </div>
         </div>
         <p className="text-sm text-slate-600 dark:text-slate-400">
-          Are you sure you want to remove <strong className="text-slate-900 dark:text-slate-100">{displayName}</strong>?
-          All API keys and synced trade data for this exchange will be permanently deleted.
+          {t.exchange.removeConfirmPrefix}{' '}
+          <strong className="text-slate-900 dark:text-slate-100">{displayName}</strong>
+          {t.exchange.removeConfirmSuffix}
         </p>
         <div className="flex gap-3 justify-end">
           <button
             onClick={onCancel}
             className="px-5 py-2 rounded-lg font-semibold text-sm text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
           >
-            Cancel
+            {t.exchange.cancel}
           </button>
           <button
             onClick={onConfirm}
             className="px-5 py-2 rounded-lg font-bold text-sm bg-red-500 text-white hover:bg-red-600 transition-colors flex items-center gap-1.5"
           >
             <span className="material-symbols-outlined text-[16px]">delete</span>
-            Remove
+            {t.exchange.remove}
           </button>
         </div>
       </div>
@@ -601,22 +641,22 @@ function ConfirmDeleteModal({
 }
 
 function SecurityBanner() {
+  const { t } = useT()
   return (
     <div className="rounded-2xl bg-gradient-to-br from-primary to-[#433362] p-8 text-accent relative overflow-hidden">
       <div className="absolute -right-12 -top-12 size-48 bg-accent/10 rounded-full blur-3xl pointer-events-none" />
       <div className="relative z-10 flex flex-col md:flex-row justify-between items-center gap-6">
         <div className="flex flex-col gap-2 text-center md:text-left">
-          <h2 className="text-2xl font-black">Secure API Connection</h2>
+          <h2 className="text-2xl font-black">{t.exchange.securityTitle}</h2>
           <p className="text-slate-100/80 max-w-md text-sm">
-            We use AES-256-GCM encryption to protect your API keys. Your funds remain safe on the
-            exchange — we only request read-only access.
+            {t.exchange.securityBody}
           </p>
         </div>
         <div className="flex gap-5 flex-shrink-0">
           {[
-            { icon: 'verified_user', label: 'Encrypted' },
-            { icon: 'lock', label: 'Read-only' },
-            { icon: 'privacy_tip', label: 'No Withdrawal' },
+            { icon: 'verified_user', label: t.exchange.encrypted },
+            { icon: 'lock', label: t.exchange.readOnly },
+            { icon: 'privacy_tip', label: t.exchange.noWithdrawal },
           ].map((item) => (
             <div key={item.label} className="flex flex-col items-center gap-1 text-accent/80">
               <span className="material-symbols-outlined text-[22px]">{item.icon}</span>
@@ -630,7 +670,8 @@ function SecurityBanner() {
 }
 
 export function ExchangeIntegrationWizard(): React.JSX.Element {
-  const [accounts, setAccounts] = useState<ExchangeAccount[]>([])
+  const { t } = useT()
+  const [accounts, setAccounts] = useState<ExchangeAccountWithStats[]>([])
   const [isLoading, setIsLoading] = useState(true)
 
   const [modalOpen, setModalOpen] = useState(false)
@@ -647,25 +688,107 @@ export function ExchangeIntegrationWizard(): React.JSX.Element {
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
 
-  const [syncingId, setSyncingId] = useState<string | null>(null)
+  const [syncStartedAt, setSyncStartedAt] = useState<Record<string, number>>({})
+  const [syncNotices, setSyncNotices] = useState<Record<string, SyncNotice>>({})
+  const [syncRetryAt, setSyncRetryAt] = useState<Record<string, string>>({})
+  const [syncRequests, setSyncRequests] = useState<Record<string, true>>({})
+  const syncStartedAtRef = useRef<Record<string, number>>({})
   const [deleteTarget, setDeleteTarget] = useState<ExchangeAccount | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
 
-  const fetchAccounts = useCallback(async () => {
-    setIsLoading(true)
+  const updateSyncStartedAt = useCallback((update: (prev: Record<string, number>) => Record<string, number>) => {
+    const next = update(syncStartedAtRef.current)
+    syncStartedAtRef.current = next
+    setSyncStartedAt(next)
+  }, [])
+
+  const setSyncNotice = useCallback((id: string, notice: SyncNotice | null) => {
+    setSyncNotices((prev) => {
+      const next = { ...prev }
+      if (notice) next[id] = notice
+      else delete next[id]
+      return next
+    })
+  }, [])
+
+  const startTracking = useCallback(
+    (ids: string[]) => {
+      if (ids.length === 0) return
+      const now = Date.now()
+      updateSyncStartedAt((prev) => {
+        const next = { ...prev }
+        for (const id of ids) if (!(id in next)) next[id] = now
+        return next
+      })
+    },
+    [updateSyncStartedAt]
+  )
+
+  const fetchAccounts = useCallback(async (): Promise<ExchangeAccountWithStats[] | null> => {
     try {
       const res = await fetch('/api/exchange/accounts')
       const data = await res.json()
       if (data.success && Array.isArray(data.data)) {
         setAccounts(data.data)
+        return data.data as ExchangeAccountWithStats[]
       }
     } catch {}
-    setIsLoading(false)
+    return null
   }, [])
 
   useEffect(() => {
-    fetchAccounts()
-  }, [fetchAccounts])
+    let active = true
+    void (async () => {
+      const loaded = await fetchAccounts()
+      if (!active) return
+      if (loaded) startTracking(loaded.filter((a) => a.sync_status === 'syncing').map((a) => a.id))
+      setIsLoading(false)
+    })()
+    return () => {
+      active = false
+    }
+  }, [fetchAccounts, startTracking])
+
+  const pollSyncing = useCallback(async () => {
+    const tracked = syncStartedAtRef.current
+    if (Object.keys(tracked).length === 0) return
+    const loaded = await fetchAccounts()
+    if (!loaded) return
+    const now = Date.now()
+    const finished: string[] = []
+    for (const [id, startedAt] of Object.entries(tracked)) {
+      const account = loaded.find((a) => a.id === id)
+      if (!account) {
+        finished.push(id)
+      } else if (account.sync_status !== 'syncing') {
+        finished.push(id)
+        setSyncNotice(
+          id,
+          account.sync_status === 'error'
+            ? { kind: 'error', text: syncErrorMessage(account.sync_error, t.exchange.syncErrors, t.exchange.syncFailed) }
+            : { kind: 'success', text: t.exchange.syncComplete }
+        )
+      } else if (now - startedAt >= SCAN_POLL_MAX_WAIT_MS) {
+        finished.push(id)
+        setSyncNotice(id, { kind: 'error', text: t.exchange.syncTimeout })
+      }
+    }
+    if (finished.length > 0) {
+      updateSyncStartedAt((prev) => {
+        const next = { ...prev }
+        for (const id of finished) delete next[id]
+        return next
+      })
+    }
+  }, [fetchAccounts, setSyncNotice, updateSyncStartedAt, t])
+
+  const hasTracked = Object.keys(syncStartedAt).length > 0
+
+  useEffect(() => {
+    if (!hasTracked) return
+    const timer = setInterval(() => void pollSyncing(), SCAN_POLL_INTERVAL_MS)
+    return () => clearInterval(timer)
+  }, [hasTracked, pollSyncing])
 
   const openConnectModal = () => {
     setModalMode('connect')
@@ -717,8 +840,9 @@ export function ExchangeIntegrationWizard(): React.JSX.Element {
     }
     if (step === 2) {
       const requiresPassphrase = selectedExchange === 'okx' || selectedExchange === 'bitget'
+      const requiresSecret = selectedExchange === 'okx' || selectedExchange === 'gateio'
       const supportsProxy = selectedExchange === 'binance' || selectedExchange === 'bybit'
-      if (!selectedExchange || !apiKey.trim() || !apiSecret.trim() || (requiresPassphrase && !passphrase.trim())) return
+      if (!selectedExchange || !apiKey.trim() || (requiresSecret && !apiSecret.trim()) || (requiresPassphrase && !passphrase.trim())) return
       setIsSubmitting(true)
       setSubmitError(null)
       try {
@@ -754,29 +878,7 @@ export function ExchangeIntegrationWizard(): React.JSX.Element {
           })
         }
         const data = await res.json()
-        const errorMessages: Record<string, string> = {
-          CONFLICT: 'This exchange is already connected.',
-          INVALID_KEY: 'That API key was rejected. Check the key and try again.',
-          INVALID_API_KEY: 'That API key was rejected. Check the key and try again.',
-          INVALID_SECRET_OR_PASSPHRASE: 'The secret or passphrase was rejected. Check both and try again.',
-          IP_NOT_WHITELISTED: 'The exchange rejected this server IP. Add the platform IP to the key allowlist.',
-          TRADE_PERMISSION_DETECTED: 'This key can trade. Create a read-only key and try again.',
-          WITHDRAW_PERMISSION_DETECTED: 'This key can withdraw. Create a read-only key with withdrawal disabled.',
-          TRANSFER_PERMISSION_DETECTED: 'This key can transfer funds. Create a read-only key with transfers disabled.',
-          GEO_BLOCKED: 'The exchange blocked this server region. Try again later.',
-          EXCHANGE_REGION_BLOCKED: 'The exchange blocked this server region. Try again later.',
-          RATE_LIMITED: 'Too many validation attempts. Wait and try again.',
-          EXCHANGE_UNREACHABLE: 'The exchange could not be reached. Try again in a few minutes.',
-          EXCHANGE_TIME_DRIFT: 'Server time is out of sync with the exchange. Try again in a moment.',
-          PASSPHRASE_REQUIRED: 'Passphrase is required for this exchange.',
-          UNKNOWN: 'The exchange could not validate this key. Try again.',
-          UNSUPPORTED_EXCHANGE: 'This exchange is not supported.',
-          VALIDATION_ERROR: 'Please check your input and try again.',
-          PERMISSIONS_UNVERIFIED: 'The key was saved. The exchange did not confirm that it is read-only.',
-          FUTURES_PERMISSION_PRESENT: 'This key can trade futures. The app never places orders. Use an IP whitelist.',
-          IP_RESTRICT_DISABLED: 'The key was saved. It is not restricted to an IP allowlist.',
-          IP_WHITELIST_MISSING: 'The key was saved. No IP allowlist was reported for this key.',
-        }
+        const errorMessages: Record<string, string> = t.exchange.connectErrors
         if (data.success) {
           await fetchAccounts()
           const warnings = Array.isArray(data.warnings) ? data.warnings : []
@@ -787,10 +889,10 @@ export function ExchangeIntegrationWizard(): React.JSX.Element {
           setSubmitError(warningText || null)
           setStep(3)
         } else {
-          setSubmitError(errorMessages[data.error] ?? 'Connection failed. Please try again.')
+          setSubmitError(errorMessages[data.error] ?? t.exchange.connectionFailed)
         }
       } catch {
-        setSubmitError('Network error. Please try again.')
+        setSubmitError(t.exchange.networkError)
       } finally {
         setIsSubmitting(false)
       }
@@ -835,16 +937,37 @@ export function ExchangeIntegrationWizard(): React.JSX.Element {
   }
 
   const handleSync = async (account: ExchangeAccount) => {
-    setSyncingId(account.id)
+    setSyncNotice(account.id, null)
+    setSyncRequests((prev) => ({ ...prev, [account.id]: true }))
     try {
-      await fetch('/api/exchange/sync', {
+      const res = await fetch('/api/exchange/sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ exchangeAccountId: account.id }),
       })
-      await fetchAccounts()
-    } catch {}
-    setSyncingId(null)
+      const data = await res.json()
+      if (res.ok || data.error === 'SYNC_IN_PROGRESS') {
+        startTracking([account.id])
+        await fetchAccounts()
+        return
+      }
+      const code = typeof data.error === 'string' ? data.error : ''
+      if (typeof data.retryAt === 'string') {
+        const retryAt: string = data.retryAt
+        setSyncRetryAt((prev) => ({ ...prev, [account.id]: retryAt }))
+        setSyncNotice(account.id, null)
+        return
+      }
+      setSyncNotice(account.id, { kind: 'error', text: (t.exchange.syncErrors as Record<string, string>)[code] ?? t.exchange.syncFailed })
+    } catch {
+      setSyncNotice(account.id, { kind: 'error', text: t.exchange.networkError })
+    } finally {
+      setSyncRequests((prev) => {
+        const next = { ...prev }
+        delete next[account.id]
+        return next
+      })
+    }
   }
 
   const handleDeleteConfirm = async () => {
@@ -864,14 +987,14 @@ export function ExchangeIntegrationWizard(): React.JSX.Element {
   const connectedExchangeIds = accounts.map((a) => a.exchange)
 
   return (
-    <div className="px-6 lg:px-12 xl:px-20 py-8 flex flex-col gap-8">
+    <div className="p-4 sm:p-6 lg:p-8 flex flex-col gap-8">
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6">
         <div className="flex flex-col gap-1">
-          <h1 className="text-slate-900 dark:text-slate-100 text-3xl font-black leading-tight tracking-tight">
-            Exchange Management
+          <h1 className="text-slate-900 dark:text-slate-100 text-2xl sm:text-3xl font-black leading-tight tracking-tight">
+            {t.exchange.pageTitle}
           </h1>
           <p className="text-slate-500 dark:text-slate-400 text-base">
-            Manage your connected exchange accounts and sync settings across your portfolio.
+            {t.exchange.pageSubtitle}
           </p>
         </div>
         <button
@@ -879,7 +1002,7 @@ export function ExchangeIntegrationWizard(): React.JSX.Element {
           className="flex items-center gap-2 rounded-xl h-12 px-6 bg-primary text-accent font-bold text-sm shadow-lg shadow-primary/20 hover:scale-[1.02] active:scale-[0.98] transition-all whitespace-nowrap"
         >
           <span className="material-symbols-outlined text-[18px]">add</span>
-          Connect New Exchange
+          {t.exchange.connectNew}
         </button>
       </div>
 
@@ -888,10 +1011,9 @@ export function ExchangeIntegrationWizard(): React.JSX.Element {
           <span className="material-symbols-outlined text-[18px]">info</span>
         </div>
         <div className="flex flex-col gap-0.5">
-          <p className="text-slate-900 dark:text-slate-100 text-sm font-bold leading-tight">Sync Notice</p>
+          <p className="text-slate-900 dark:text-slate-100 text-sm font-bold leading-tight">{t.exchange.syncNoticeTitle}</p>
           <p className="text-slate-600 dark:text-slate-400 text-sm">
-            Toggling off an exchange will exclude its data from your global dashboard analytics and PnL
-            calculations.
+            {t.exchange.syncNoticeBody}
           </p>
         </div>
       </div>
@@ -910,8 +1032,10 @@ export function ExchangeIntegrationWizard(): React.JSX.Element {
               onSync={handleSync}
               onEdit={openEditModal}
               onDelete={(a) => setDeleteTarget(a)}
-              isSyncing={syncingId === account.id}
+              isSyncing={account.id in syncRequests || account.id in syncStartedAt || account.sync_status === 'syncing'}
               isDeleting={deletingId === account.id}
+              notice={syncNotices[account.id]}
+              retryAt={syncRetryAt[account.id]}
             />
           ))}
         </div>

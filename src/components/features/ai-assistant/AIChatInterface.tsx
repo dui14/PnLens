@@ -3,12 +3,29 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { ChatMessage } from '@/components/chat/ChatMessage'
+import { useT } from '@/lib/i18n/client'
+import { fillTemplate } from '@/lib/i18n/format'
+import { AiModelPicker } from '@/components/features/ai-assistant/AiModelPicker'
+import { createSupabaseBrowserClient } from '@/lib/db/supabase-browser'
+import { AI_SELECTION_STORAGE_PREFIX } from '@/lib/ai/providerConfig'
+import { classifyAiError } from '@/lib/ai/chatErrors'
+import { AI_CONVERSATION_RENAMED_EVENT } from '@/lib/ai/guardrails'
+import {
+  isSelectionUsable,
+  modelSupportsEffort,
+  parseStoredSelection,
+  pickDefaultSelection,
+  type ChatSelection,
+} from '@/lib/ai/modelGating'
+import { AppLogo } from '@/components/ui/AppLogo'
+import type { Dictionary } from '@/lib/i18n'
 import type { AgentThinkingLink, AgentThinkingStep } from '@/components/chat/AgentThinkingPanel'
 import type {
   AgentAnalysisStep,
   ChatConversation,
   ChatMessage as ChatMessageModel,
   ChatMessageAnalysisMeta,
+  AiProviderSummary,
 } from '@/lib/types'
 
 type StreamEvent = {
@@ -33,12 +50,12 @@ function getEventPayload(event: StreamEvent): Record<string, unknown> {
   return event as Record<string, unknown>
 }
 
-function getFallbackToolLabel(tool: string): string {
-  if (tool === 'get_trade_history') return 'Đang lấy lịch sử giao dịch...'
-  if (tool === 'get_pnl_stats') return 'Đang tính toán thống kê PNL...'
-  if (tool === 'get_market_quotes') return 'Đang lấy giá thị trường...'
-  if (tool === 'get_crypto_news') return 'Đang tìm tin tức thị trường...'
-  return `Đang chạy ${tool}...`
+function getFallbackToolLabel(tool: string, labels: Dictionary['ai']['tools']): string {
+  if (tool === 'get_trade_history') return labels.tradeHistory
+  if (tool === 'get_pnl_stats') return labels.pnlStats
+  if (tool === 'get_market_quotes') return labels.marketQuotes
+  if (tool === 'get_crypto_news') return labels.news
+  return fillTemplate(labels.running, { tool })
 }
 
 function getElapsedSeconds(startedAt: number): number {
@@ -53,7 +70,7 @@ function readNumber(value: unknown): number | null {
   return null
 }
 
-function readThinkingLinks(value: unknown): AgentThinkingLink[] | undefined {
+function readThinkingLinks(value: unknown, detailsLabel: string): AgentThinkingLink[] | undefined {
   if (!Array.isArray(value)) return undefined
 
   const links: AgentThinkingLink[] = []
@@ -69,7 +86,7 @@ function readThinkingLinks(value: unknown): AgentThinkingLink[] | undefined {
     }
 
     links.push({
-      title: readText(record.title) ?? 'Chi tiet',
+      title: readText(record.title) ?? detailsLabel,
       url,
       source: readText(record.source) ?? undefined,
     })
@@ -78,7 +95,7 @@ function readThinkingLinks(value: unknown): AgentThinkingLink[] | undefined {
   return links.length > 0 ? links : undefined
 }
 
-function readAnalysisMeta(value: unknown): ChatMessageAnalysisMeta | null {
+function readAnalysisMeta(value: unknown, detailsLabel: string): ChatMessageAnalysisMeta | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return null
   }
@@ -117,7 +134,7 @@ function readAnalysisMeta(value: unknown): ChatMessageAnalysisMeta | null {
         label,
         status,
         summary: readText(step.summary) ?? undefined,
-        links: readThinkingLinks(step.links),
+        links: readThinkingLinks(step.links, detailsLabel),
       })
     }
   }
@@ -165,24 +182,9 @@ function mapAnalysisStepsToThinkingSteps(
   })
 }
 
-export type AIModelOption = {
-  id: string
-  label: string
-}
-
-export type AIChatInterfaceProps = {
-  modelOptions: AIModelOption[]
-  defaultModelId: string
-}
-
-export function AIChatInterface({
-  modelOptions,
-  defaultModelId,
-}: AIChatInterfaceProps): React.JSX.Element {
-  const preferredModel =
-    modelOptions.find((option) => option.id === defaultModelId)?.id ??
-    modelOptions[0]?.id ??
-    defaultModelId
+export function AIChatInterface(): React.JSX.Element {
+  const { t, locale } = useT()
+  const ai = t.ai
 
   const router = useRouter()
   const searchParams = useSearchParams()
@@ -199,7 +201,9 @@ export function AIChatInterface({
   const [elapsedTime, setElapsedTime] = useState(0)
   const [collapsedByMessageId, setCollapsedByMessageId] = useState<Record<string, boolean>>({})
   const [thinkingMessageId, setThinkingMessageId] = useState<string | null>(null)
-  const [selectedModel, setSelectedModel] = useState(preferredModel)
+  const [providerSummaries, setProviderSummaries] = useState<AiProviderSummary[] | null>(null)
+  const [selection, setSelection] = useState<ChatSelection | null>(null)
+  const [selectionUserId, setSelectionUserId] = useState<string | null | undefined>(undefined)
   const [mobileHistoryOpen, setMobileHistoryOpen] = useState(false)
   const [mobileConversations, setMobileConversations] = useState<ChatConversation[]>([])
   const [mobileConversationsLoading, setMobileConversationsLoading] = useState(false)
@@ -276,7 +280,7 @@ export function AIChatInterface({
       const next = { ...prev }
 
       for (const message of messages) {
-        const analysisMeta = readAnalysisMeta(message.analysis_meta)
+        const analysisMeta = readAnalysisMeta(message.analysis_meta, ai.details)
         if (!analysisMeta) {
           continue
         }
@@ -289,17 +293,82 @@ export function AIChatInterface({
 
       return changed ? next : prev
     })
-  }, [messages])
+  }, [messages, ai.details])
 
   useEffect(() => {
-    setSelectedModel((prev) => {
-      if (modelOptions.some((option) => option.id === prev)) {
-        return prev
+    let cancelled = false
+    const loadProviders = async (): Promise<void> => {
+      try {
+        const res = await fetch('/api/ai/providers')
+        const payload = (await res.json()) as { success: boolean; data: AiProviderSummary[] | null }
+        if (cancelled) return
+        setProviderSummaries(payload.success && payload.data ? payload.data : [])
+      } catch {
+        if (!cancelled) setProviderSummaries([])
       }
+    }
+    void loadProviders()
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
-      return preferredModel
+  useEffect(() => {
+    let cancelled = false
+    const loadUser = async (): Promise<void> => {
+      try {
+        const { data } = await createSupabaseBrowserClient().auth.getUser()
+        if (!cancelled) setSelectionUserId(data.user?.id ?? null)
+      } catch {
+        if (!cancelled) setSelectionUserId(null)
+      }
+    }
+    void loadUser()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!providerSummaries || selectionUserId === undefined) return
+    let stored: ChatSelection | null = null
+    if (selectionUserId) {
+      try {
+        stored = parseStoredSelection(
+          window.localStorage.getItem(`${AI_SELECTION_STORAGE_PREFIX}${selectionUserId}`)
+        )
+      } catch {
+        stored = null
+      }
+    }
+    setSelection((prev) => {
+      if (prev && isSelectionUsable(providerSummaries, prev)) return prev
+      if (stored && isSelectionUsable(providerSummaries, stored)) return stored
+      return pickDefaultSelection(providerSummaries)
     })
-  }, [modelOptions, preferredModel])
+  }, [providerSummaries, selectionUserId])
+
+  const updateSelection = useCallback(
+    (next: ChatSelection): void => {
+      setSelection(next)
+      if (!selectionUserId) return
+      try {
+        window.localStorage.setItem(
+          `${AI_SELECTION_STORAGE_PREFIX}${selectionUserId}`,
+          JSON.stringify(next)
+        )
+      } catch {}
+    },
+    [selectionUserId]
+  )
+
+  const describeChatError = useCallback(
+    (code: string): string => {
+      const known = t.aiProviders.errors as Record<string, string>
+      return known[code] ?? known[classifyAiError(code)] ?? known.generic
+    },
+    [t]
+  )
 
   useEffect(() => {
     if (!mobileHistoryOpen) {
@@ -317,6 +386,19 @@ export function AIChatInterface({
     window.addEventListener('ai-conv-change', handler)
     return () => window.removeEventListener('ai-conv-change', handler)
   }, [loadMobileConversations])
+
+  useEffect(() => {
+    const handler = (event: Event): void => {
+      const detail = (event as CustomEvent<{ id: string; title: string }>).detail
+      if (detail.id === activeConvId) setConvTitle(detail.title)
+      setMobileConversations((prev) =>
+        prev.map((c) => (c.id === detail.id ? { ...c, title: detail.title } : c))
+      )
+    }
+
+    window.addEventListener(AI_CONVERSATION_RENAMED_EVENT, handler)
+    return () => window.removeEventListener(AI_CONVERSATION_RENAMED_EVENT, handler)
+  }, [activeConvId])
 
   const handleMobileConversationSelect = (conversationId: string): void => {
     router.push(`/ai-assistant?conv=${conversationId}`)
@@ -344,7 +426,7 @@ export function AIChatInterface({
 
   const handleSend = useCallback(async (): Promise<void> => {
     const trimmed = inputValue.trim()
-    if (!trimmed || isSending) return
+    if (!trimmed || isSending || !selection) return
 
     const tempUserMsg: ChatMessageModel = {
       id: `temp-${Date.now()}`,
@@ -421,6 +503,18 @@ export function AIChatInterface({
       })
     }
 
+    const markTempAssistantFailed = (rawError: string): void => {
+      const code = classifyAiError(rawError)
+      lastPatchedAssistantContent = code
+      setMessages((prev) =>
+        prev.map((message) =>
+          message.id === tempAssistantMsg.id
+            ? { ...message, content: code, status: 'error', error_code: code }
+            : message
+        )
+      )
+    }
+
     const flushQueuedAssistantContent = (): void => {
       if (queuedAssistantContent === null) {
         return
@@ -465,7 +559,12 @@ export function AIChatInterface({
         body: JSON.stringify({
           message: trimmed,
           conversationId: activeConvId,
-          model: selectedModel,
+          locale,
+          provider: selection.provider,
+          model: selection.model,
+          ...(modelSupportsEffort(selection.provider, selection.model)
+            ? { effort: selection.effort }
+            : {}),
         }),
       })
 
@@ -549,7 +648,7 @@ export function AIChatInterface({
             }
 
             if (event.type === 'thinking_start') {
-              const message = readText(eventPayload.message) ?? 'Đang suy nghĩ...'
+              const message = readText(eventPayload.message) ?? ai.thinking
               setThinkingSteps((prev) => [
                 ...prev,
                 {
@@ -576,7 +675,7 @@ export function AIChatInterface({
 
             if (event.type === 'tool_start') {
               const tool = readText(eventPayload.tool) ?? 'tool'
-              const label = readText(eventPayload.label) ?? getFallbackToolLabel(tool)
+              const label = readText(eventPayload.label) ?? getFallbackToolLabel(tool, ai.tools)
 
               setThinkingSteps((prev) => [
                 ...prev,
@@ -593,7 +692,7 @@ export function AIChatInterface({
             if (event.type === 'tool_done') {
               const tool = readText(eventPayload.tool) ?? 'tool'
               const summary = readText(eventPayload.summary) ?? undefined
-              const links = readThinkingLinks(eventPayload.links)
+              const links = readThinkingLinks(eventPayload.links, ai.details)
 
               setThinkingSteps((prev) => {
                 const next = [...prev]
@@ -617,7 +716,7 @@ export function AIChatInterface({
                     id: makeStepId('tool'),
                     type: 'tool',
                     tool,
-                    label: getFallbackToolLabel(tool),
+                    label: getFallbackToolLabel(tool, ai.tools),
                     status: 'done',
                     summary,
                     links,
@@ -657,7 +756,7 @@ export function AIChatInterface({
       }
 
       if (streamError && fullContent.length === 0) {
-        patchTempAssistantMessage(`Error: ${streamError}`)
+        markTempAssistantFailed(streamError)
       }
 
       if (newConvId) {
@@ -671,7 +770,7 @@ export function AIChatInterface({
     } catch (error) {
       const message = error instanceof Error ? error.message : 'INTERNAL_ERROR'
       stopAssistantContentFlush()
-      patchTempAssistantMessage(`Error: ${message}`)
+      markTempAssistantFailed(message)
     } finally {
       stopAssistantContentFlush()
       setIsThinking(false)
@@ -679,7 +778,7 @@ export function AIChatInterface({
       thinkingStartedAtRef.current = null
       setIsSending(false)
     }
-  }, [inputValue, isSending, activeConvId, convTitle, router, selectedModel])
+  }, [inputValue, isSending, activeConvId, convTitle, router, selection, ai, locale])
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>): void => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -695,19 +794,19 @@ export function AIChatInterface({
           type="button"
           onClick={() => setMobileHistoryOpen(true)}
           className="md:hidden size-8 flex items-center justify-center rounded-lg border border-neutral-border bg-neutral-dark text-slate-300"
-          aria-label="Open conversations"
+          aria-label={ai.openConversations}
         >
           <span className="material-symbols-outlined text-base">menu</span>
         </button>
-        <span className="material-symbols-outlined text-primary mr-3 text-lg">smart_toy</span>
+        <AppLogo size={24} className="mr-3" />
         <h2 className="text-slate-100 font-bold text-sm tracking-tight truncate flex-1">
-          {convTitle ?? (activeConvId ? 'Conversation' : 'New Conversation')}
+          {convTitle ?? (activeConvId ? ai.conversation : ai.newConversation)}
         </h2>
         <button
           type="button"
           onClick={handleMobileNewChat}
           className="md:hidden size-8 flex items-center justify-center rounded-lg border border-neutral-border bg-neutral-dark text-slate-300"
-          aria-label="New conversation"
+          aria-label={ai.newConversationAria}
         >
           <span className="material-symbols-outlined text-base">add</span>
         </button>
@@ -719,17 +818,17 @@ export function AIChatInterface({
             type="button"
             onClick={() => setMobileHistoryOpen(false)}
             className="absolute inset-0 bg-black/50"
-            aria-label="Close conversations"
+            aria-label={ai.closeConversations}
           />
 
           <aside className="absolute left-0 top-0 h-full w-[86%] max-w-sm bg-background-dark border-r border-neutral-border flex flex-col">
             <div className="h-14 px-4 border-b border-neutral-border flex items-center justify-between">
-              <h3 className="text-sm font-semibold text-slate-100">Lịch sử chat</h3>
+              <h3 className="text-sm font-semibold text-slate-100">{ai.historyTitle}</h3>
               <button
                 type="button"
                 onClick={() => setMobileHistoryOpen(false)}
                 className="size-8 flex items-center justify-center rounded-lg border border-neutral-border bg-neutral-dark text-slate-300"
-                aria-label="Close history"
+                aria-label={ai.closeHistory}
               >
                 <span className="material-symbols-outlined text-base">close</span>
               </button>
@@ -741,7 +840,7 @@ export function AIChatInterface({
                 onClick={handleMobileNewChat}
                 className="w-full h-10 rounded-lg bg-primary/10 text-primary font-semibold text-sm border border-primary/30"
               >
-                New Chat
+                {t.nav.newChat}
               </button>
             </div>
 
@@ -753,7 +852,7 @@ export function AIChatInterface({
               )}
 
               {!mobileConversationsLoading && mobileConversations.length === 0 && (
-                <p className="text-xs text-slate-500 px-2 py-2">No conversations yet</p>
+                <p className="text-xs text-slate-500 px-2 py-2">{t.nav.noConversations}</p>
               )}
 
               {!mobileConversationsLoading &&
@@ -773,7 +872,7 @@ export function AIChatInterface({
                     >
                       <span className="material-symbols-outlined text-base shrink-0">chat_bubble</span>
                       <span className="text-xs font-medium truncate">
-                        {conversation.title ?? 'Untitled'}
+                        {conversation.title ?? t.nav.untitled}
                       </span>
                     </button>
                   )
@@ -793,14 +892,14 @@ export function AIChatInterface({
         )}
         {!loadingMessages && messages.length === 0 && (
           <div className="flex flex-col items-center justify-center h-full gap-4 text-center">
-            <span className="material-symbols-outlined text-primary/30 text-6xl">smart_toy</span>
+            <AppLogo size={72} className="opacity-70" />
             <p className="text-slate-500 text-sm max-w-sm leading-relaxed">
-              Ask me about market trends, technical analysis, PNL performance, or trading strategies.
+              {ai.emptyPrompt}
             </p>
           </div>
         )}
         {messages.map((message) => {
-          const analysisMeta = readAnalysisMeta(message.analysis_meta)
+          const analysisMeta = readAnalysisMeta(message.analysis_meta, ai.details)
           const isActiveThinkingMessage =
             message.role === 'assistant' && message.id === thinkingMessageId
           const shouldShowStoredAnalysis =
@@ -832,6 +931,11 @@ export function AIChatInterface({
             <ChatMessage
               key={message.id}
               message={message}
+              errorText={
+                message.status === 'error'
+                  ? describeChatError(message.error_code ?? message.content)
+                  : undefined
+              }
               showThinkingPanel={showThinkingPanel}
               thinkingSteps={showThinkingPanel ? panelSteps : []}
               isThinking={showThinkingPanel ? isActiveThinkingMessage && isThinking : false}
@@ -845,30 +949,27 @@ export function AIChatInterface({
       </div>
 
       <div className="sticky bottom-0 z-20 p-3 md:p-4 bg-gradient-to-t from-background-dark via-background-dark/95 to-transparent">
-        <div className="max-w-3xl mx-auto flex items-center gap-2 md:gap-3 bg-neutral-dark border border-neutral-border rounded-2xl px-3 md:px-4 py-2.5 md:py-3 shadow-xl">
-          <select
-            value={selectedModel}
-            onChange={(e) => setSelectedModel(e.target.value)}
+        <div className="max-w-3xl mx-auto flex flex-wrap items-center gap-2 md:gap-3 bg-neutral-dark border border-neutral-border rounded-2xl px-3 md:px-4 py-2.5 md:py-3 shadow-xl">
+          {providerSummaries && !selection && (
+            <p className="w-full text-xs text-slate-400">{t.aiProviders.chat.noUsable}</p>
+          )}
+          <AiModelPicker
+            summaries={providerSummaries}
+            selection={selection}
             disabled={isSending}
-            className="h-9 max-w-[132px] md:max-w-[180px] rounded-lg border border-neutral-border bg-background-dark px-2.5 md:px-3 text-xs text-slate-200 outline-none transition-colors focus:border-primary disabled:opacity-60"
-          >
-            {modelOptions.map((option) => (
-              <option key={option.id} value={option.id}>
-                {option.label}
-              </option>
-            ))}
-          </select>
+            onSelect={updateSelection}
+          />
           <input
             type="text"
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Ask about your trades, PNL, or market analysis..."
-            className="flex-1 min-w-0 bg-transparent text-sm text-slate-200 placeholder-slate-500 outline-none"
+            placeholder={ai.placeholder}
+            className="flex-1 min-w-[40%] bg-transparent text-sm text-slate-200 placeholder-slate-500 outline-none"
           />
           <button
             onClick={handleSend}
-            disabled={!inputValue.trim() || isSending}
+            disabled={!inputValue.trim() || isSending || !selection}
             className="size-9 flex items-center justify-center rounded-xl bg-primary text-white hover:bg-primary/90 transition-colors disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
           >
             <span className="material-symbols-outlined text-base">

@@ -92,6 +92,25 @@ export function addDecimals(left: string, right: string): string | null {
   return unscaledInteger(sum + addend, scale)
 }
 
+export function multiplyDecimals(left: string, right: string): string | null {
+  if (!VENUE_DECIMAL.test(left) || !VENUE_DECIMAL.test(right)) return null
+  const leftScale = left.split('.')[1]?.length ?? 0
+  const rightScale = right.split('.')[1]?.length ?? 0
+  const leftInt = scaledInteger(left, leftScale)
+  const rightInt = scaledInteger(right, rightScale)
+  if (leftInt === null || rightInt === null) return null
+  return unscaledInteger(leftInt * rightInt, leftScale + rightScale)
+}
+
+export function absDecimal(value: string): string {
+  return value.startsWith('-') ? value.slice(1) : value
+}
+
+export function negateDecimal(value: string): string {
+  if (!VENUE_DECIMAL.test(value) || /^-?0(\.0+)?$/.test(value)) return value
+  return value.startsWith('-') ? value.slice(1) : `-${value}`
+}
+
 function unscaledInteger(value: bigint, scale: number): string {
   const negative = value < BigInt(0)
   const digits = (negative ? -value : value).toString().padStart(scale + 1, '0')

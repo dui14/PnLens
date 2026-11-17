@@ -39,22 +39,22 @@ export const TOOL_DEFINITIONS: OpenRouterToolDefinition[] = [
     type: 'function',
     function: {
       name: 'get_trade_history',
-      description: 'Lay lich su giao dich da dong gan day cua user trong he thong',
+      description: 'Get recent closed trades of the user from the system',
       parameters: {
         type: 'object',
         properties: {
           exchange: {
             type: 'string',
-            description: 'Loc theo san giao dich',
+            description: 'Filter by exchange',
             enum: TOOL_EXCHANGES,
           },
           symbol: {
             type: 'string',
-            description: 'Loc theo cap giao dich, vi du BTCUSDT',
+            description: 'Filter by trading pair, for example BTCUSDT',
           },
           limit: {
             type: 'number',
-            description: 'So luong giao dich toi da, toi thieu 1 toi da 50',
+            description: 'Maximum number of trades, minimum 1, maximum 50',
           },
         },
         additionalProperties: false,
@@ -65,18 +65,18 @@ export const TOOL_DEFINITIONS: OpenRouterToolDefinition[] = [
     type: 'function',
     function: {
       name: 'get_pnl_stats',
-      description: 'Tinh thong ke PNL trong khoang thoi gian 7/30/90 ngay',
+      description: 'Calculate PNL statistics over a 7/30/90 day period',
       parameters: {
         type: 'object',
         properties: {
           period: {
             type: 'string',
-            description: 'Khoang thoi gian thong ke',
+            description: 'Statistics period',
             enum: TOOL_PERIODS,
           },
           exchange: {
             type: 'string',
-            description: 'Loc theo san giao dich',
+            description: 'Filter by exchange',
             enum: TOOL_EXCHANGES,
           },
         },
@@ -88,17 +88,17 @@ export const TOOL_DEFINITIONS: OpenRouterToolDefinition[] = [
     type: 'function',
     function: {
       name: 'get_crypto_news',
-      description: 'Lay tin tuc crypto moi nhat tu nhieu RSS feed song song',
+      description: 'Get the latest crypto news from multiple RSS feeds in parallel',
       parameters: {
         type: 'object',
         properties: {
           query: {
             type: 'string',
-            description: 'Tu khoa loc tin tuc, vi du bitcoin, ethereum, etf',
+            description: 'Keyword to filter news, for example bitcoin, ethereum, etf',
           },
           limit: {
             type: 'number',
-            description: 'So luong tin tuc toi da, toi thieu 1 toi da 12',
+            description: 'Maximum number of news items, minimum 1, maximum 12',
           },
         },
         additionalProperties: false,
@@ -109,17 +109,17 @@ export const TOOL_DEFINITIONS: OpenRouterToolDefinition[] = [
     type: 'function',
     function: {
       name: 'get_market_quotes',
-      description: 'Lay gia thi truong hien tai cho tai san nhu XAUUSD, NVDA va cac symbol pho bien',
+      description: 'Get current market prices for assets such as XAUUSD, NVDA and other common symbols',
       parameters: {
         type: 'object',
         properties: {
           symbols: {
             type: 'string',
-            description: 'Danh sach symbol, tach boi dau phay. Vi du: XAUUSD,NVDA',
+            description: 'Comma-separated list of symbols. Example: XAUUSD,NVDA',
           },
           query: {
             type: 'string',
-            description: 'Cau hoi hoac tu khoa de he thong tu trich xuat symbol neu symbols khong duoc cung cap',
+            description: 'Question or keyword used to extract symbols when symbols is not provided',
           },
         },
         additionalProperties: false,

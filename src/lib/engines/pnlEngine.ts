@@ -1,4 +1,17 @@
 import type { Trade, PNLSummary, PNLChartPoint, PNLCalendarDay, PNLCalendarMonth, PeriodType } from '@/lib/types'
+import {
+  APP_UTC_OFFSET_MINUTES,
+  daysInMonth,
+  rangeFor,
+  startOfDay,
+  startOfMonth,
+  startOfWeek,
+  monthStart,
+  toDayKey,
+  toHourKey,
+  toMonthKey,
+  vietnamDateParts,
+} from '@/lib/time/dayBoundary'
 
 export function calculatePNLSummary(trades: Trade[], period: PeriodType): PNLSummary {
   if (trades.length === 0) {
@@ -56,12 +69,12 @@ export function buildPNLTimeSeries(
 ): PNLChartPoint[] {
   const tradesWithPNL = trades.filter((t) => t.realized_pnl !== null)
 
-  const buckets = buildBuckets(range)
+  const buckets = buildBuckets(range, new Date())
   const grouped = new Map<string, number>(buckets.map((bucket) => [bucket, 0]))
 
   for (const trade of tradesWithPNL) {
     const key = toBucketKey(new Date(trade.traded_at), range)
-    if (!grouped.has(key)) continue
+    if (!key || !grouped.has(key)) continue
     const existing = grouped.get(key) ?? 0
     grouped.set(key, existing + Number(trade.realized_pnl))
   }
@@ -82,73 +95,32 @@ export function buildPNLTimeSeries(
   return points
 }
 
-function toBucketKey(date: Date, range: 'day' | 'week' | 'month' | 'year'): string {
+function toBucketKey(date: Date, range: 'day' | 'week' | 'month' | 'year'): string | null {
+  if (range === 'day') return toHourKey(date, APP_UTC_OFFSET_MINUTES)
+  if (range === 'year') return toMonthKey(date, APP_UTC_OFFSET_MINUTES)
+  return toDayKey(date, APP_UTC_OFFSET_MINUTES)
+}
+
+function buildBuckets(range: 'day' | 'week' | 'month' | 'year', now: Date): string[] {
   if (range === 'day') {
-    return formatHourKey(date)
+    const start = startOfDay(now, APP_UTC_OFFSET_MINUTES)
+    return Array.from({ length: 24 }, (_, hour) => toHourKey(new Date(start.getTime() + hour * 60 * 60 * 1000), APP_UTC_OFFSET_MINUTES) ?? '')
+  }
+
+  if (range === 'week') {
+    const start = startOfWeek(now, APP_UTC_OFFSET_MINUTES)
+    return Array.from({ length: 7 }, (_, index) => toDayKey(new Date(start.getTime() + index * 24 * 60 * 60 * 1000), APP_UTC_OFFSET_MINUTES) ?? '')
   }
 
   if (range === 'year') {
-    return formatMonthKey(date)
+    const current = vietnamDateParts(now, APP_UTC_OFFSET_MINUTES)
+    return Array.from({ length: current.month }, (_, index) => toMonthKey(monthStart(current.year, index + 1, APP_UTC_OFFSET_MINUTES), APP_UTC_OFFSET_MINUTES) ?? '')
   }
 
-  return formatDayKey(date)
-}
-
-function buildBuckets(range: 'day' | 'week' | 'month' | 'year'): string[] {
-  const now = new Date()
-
-  if (range === 'day') {
-    const buckets: string[] = []
-    for (let i = 23; i >= 0; i -= 1) {
-      const d = new Date(now)
-      d.setHours(now.getHours() - i, 0, 0, 0)
-      buckets.push(formatHourKey(d))
-    }
-    return buckets
-  }
-
-  if (range === 'year') {
-    const buckets: string[] = []
-    for (let i = 11; i >= 0; i -= 1) {
-      const d = new Date(now.getFullYear(), now.getMonth() - i, 1)
-      buckets.push(formatMonthKey(d))
-    }
-    return buckets
-  }
-
-  const windowDays = range === 'week' ? 7 : 30
-  const buckets: string[] = []
-  for (let i = windowDays - 1; i >= 0; i -= 1) {
-    const d = new Date(now)
-    d.setDate(now.getDate() - i)
-    d.setHours(0, 0, 0, 0)
-    buckets.push(formatDayKey(d))
-  }
-  return buckets
-}
-
-function formatDayKey(date: Date): string {
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-
-  return `${year}-${month}-${day}`
-}
-
-function formatMonthKey(date: Date): string {
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-
-  return `${year}-${month}`
-}
-
-function formatHourKey(date: Date): string {
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  const hour = String(date.getHours()).padStart(2, '0')
-
-  return `${year}-${month}-${day} ${hour}:00`
+  const start = startOfMonth(now, APP_UTC_OFFSET_MINUTES)
+  const current = vietnamDateParts(now, APP_UTC_OFFSET_MINUTES)
+  const count = daysInMonth(current.year, current.month)
+  return Array.from({ length: count }, (_, index) => toDayKey(new Date(start.getTime() + index * 24 * 60 * 60 * 1000), APP_UTC_OFFSET_MINUTES) ?? '')
 }
 
 export function buildPNLCalendarDays(trades: Trade[], year: number, month: number): PNLCalendarDay[] {
@@ -156,17 +128,18 @@ export function buildPNLCalendarDays(trades: Trade[], year: number, month: numbe
   const grouped = new Map<string, { pnl: number; count: number }>()
 
   for (const trade of tradesWithPNL) {
-    const d = new Date(trade.traded_at)
-    if (d.getFullYear() !== year || d.getMonth() + 1 !== month) continue
-    const dateKey = `${year}-${String(month).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+    const dateKey = toDayKey(new Date(trade.traded_at), APP_UTC_OFFSET_MINUTES)
+    if (!dateKey) continue
+    const prefix = `${year}-${String(month).padStart(2, '0')}-`
+    if (!dateKey.startsWith(prefix)) continue
     const existing = grouped.get(dateKey) ?? { pnl: 0, count: 0 }
     grouped.set(dateKey, { pnl: existing.pnl + Number(trade.realized_pnl), count: existing.count + 1 })
   }
 
-  const daysInMonth = new Date(year, month, 0).getDate()
+  const length = daysInMonth(year, month)
   const result: PNLCalendarDay[] = []
 
-  for (let day = 1; day <= daysInMonth; day++) {
+  for (let day = 1; day <= length; day++) {
     const dateKey = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
     const data = grouped.get(dateKey)
     result.push({
@@ -184,9 +157,9 @@ export function buildPNLCalendarMonths(trades: Trade[], year: number): PNLCalend
   const grouped = new Map<number, { pnl: number; count: number }>()
 
   for (const trade of tradesWithPNL) {
-    const d = new Date(trade.traded_at)
-    if (d.getFullYear() !== year) continue
-    const m = d.getMonth() + 1
+    const dateKey = toDayKey(new Date(trade.traded_at), APP_UTC_OFFSET_MINUTES)
+    if (!dateKey || !dateKey.startsWith(`${year}-`)) continue
+    const m = Number(dateKey.slice(5, 7))
     const existing = grouped.get(m) ?? { pnl: 0, count: 0 }
     grouped.set(m, { pnl: existing.pnl + Number(trade.realized_pnl), count: existing.count + 1 })
   }
@@ -205,28 +178,13 @@ export function buildPNLCalendarMonths(trades: Trade[], year: number): PNLCalend
   return result
 }
 
-export function getDateRangeForPeriod(range: 'day' | 'week' | 'month' | 'year'): {
+export function getDateRangeForPeriod(range: 'day' | 'week' | 'month' | 'year', now: Date = new Date()): {
   startDate: string
   endDate: string
 } {
-  const now = new Date()
-  const endDate = now.toISOString()
-
-  let startDate: string
-  switch (range) {
-    case 'day':
-      startDate = new Date(now.setHours(0, 0, 0, 0)).toISOString()
-      break
-    case 'week':
-      startDate = new Date(now.setDate(now.getDate() - 7)).toISOString()
-      break
-    case 'month':
-      startDate = new Date(now.setDate(now.getDate() - 30)).toISOString()
-      break
-    case 'year':
-      startDate = new Date(now.setFullYear(now.getFullYear() - 1)).toISOString()
-      break
+  const window = rangeFor(range, now, APP_UTC_OFFSET_MINUTES)
+  return {
+    startDate: window.start ? window.start.toISOString() : now.toISOString(),
+    endDate: window.end.toISOString(),
   }
-
-  return { startDate, endDate }
 }

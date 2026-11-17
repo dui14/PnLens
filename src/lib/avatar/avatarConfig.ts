@@ -1,0 +1,17 @@
+export const AVATAR_BUCKET = 'avatars'
+export const AVATAR_MAX_BYTES = 2 * 1024 * 1024
+export const AVATAR_OUTPUT_SIZE = 512
+export const AVATAR_EXPORT_QUALITY = 0.9
+export const AVATAR_FORM_FIELD = 'avatar'
+export const AVATAR_ENDPOINT = '/api/settings/avatar'
+export const AVATAR_PROFILE_EVENT = 'pnlens:avatar-changed'
+export const AVATAR_PICK_MAX_BYTES = 15 * 1024 * 1024
+export const AVATAR_PICK_ACCEPT = 'image/png,image/jpeg,image/webp'
+export const AVATAR_ZOOM_MIN = 1
+export const AVATAR_ZOOM_MAX = 4
+export const AVATAR_ZOOM_STEP = 0.05
+export const AVATAR_ROTATION_STEP = 90
+export const AVATAR_FILE_PREFIX = 'avatar-'
+export const AVATAR_FILE_EXT = 'webp'
+export const AVATAR_DETECTED_TYPES = ['image/png', 'image/jpeg', 'image/webp'] as const
+export type AvatarMime = (typeof AVATAR_DETECTED_TYPES)[number]

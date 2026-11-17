@@ -1,6 +1,7 @@
 import { after, NextRequest, NextResponse } from 'next/server'
 import { createSupabaseServerClient } from '@/lib/db/supabase-server'
-import { claimExchangeScan, type ScanClaimResult } from '@/lib/db/exchangeDb'
+import { claimExchangeScan, getExchangeAccountById, type ScanClaimResult } from '@/lib/db/exchangeDb'
+import { cooldownRetryAt, retryAfterHeaders } from '@/lib/cooldown/cooldown'
 import { SCAN_COOLDOWN_MS, SCAN_STALE_AFTER_MS } from '@/lib/scan/scanLimits'
 import { runScan } from '@/lib/scan/runScan'
 import { SyncExchangeSchema } from '@/lib/validators/exchange'
@@ -55,6 +56,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   if (claim !== 'claimed') {
     const mapped = CLAIM_STATUS[claim]
+    if (claim === 'rate_limited') {
+      const account = await getExchangeAccountById(supabase, parsed.data.exchangeAccountId, user.id)
+      const retryAt = cooldownRetryAt(account?.last_synced, SCAN_COOLDOWN_MS, now)
+      return NextResponse.json(
+        { success: false, data: null, error: mapped.error, retryAt },
+        { status: mapped.status, headers: retryAfterHeaders(retryAt, now) }
+      )
+    }
     return NextResponse.json(
       { success: false, data: null, error: mapped.error },
       { status: mapped.status }

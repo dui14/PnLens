@@ -2,6 +2,18 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createSupabaseServerClient } from '@/lib/db/supabase-server'
 import { fetchAssetDistribution } from '@/lib/services/pnlService'
 import { AssetDistributionQuerySchema } from '@/lib/validators/pnl'
+import { pnlTimeFields } from '@/lib/time/dayBoundary'
+
+const PNL_ERROR_STATUS = {
+  NOT_FOUND: 404,
+  UNAUTHORIZED: 401,
+} as const
+
+function statusFor(error: string): number {
+  if (error === 'NOT_FOUND') return PNL_ERROR_STATUS.NOT_FOUND
+  if (error === 'UNAUTHORIZED') return PNL_ERROR_STATUS.UNAUTHORIZED
+  return 500
+}
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
   const supabase = await createSupabaseServerClient()
@@ -37,8 +49,11 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   )
 
   if (!result.success) {
-    return NextResponse.json({ success: false, data: null, error: result.error }, { status: 500 })
+    return NextResponse.json(
+      { success: false, data: null, error: result.error, ...pnlTimeFields() },
+      { status: statusFor(result.error) }
+    )
   }
 
-  return NextResponse.json({ success: true, data: result.data, error: null })
+  return NextResponse.json({ success: true, data: result.data, error: null, ...pnlTimeFields() })
 }

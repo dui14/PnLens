@@ -1,17 +1,13 @@
 'use client'
 
-import { useState, useEffect, useCallback, useMemo } from 'react'
-import type { Exchange, PNLCalendarDay, PNLCalendarMonth, TradeSegment } from '@/lib/types'
+import { useState, useMemo } from 'react'
+import { useT } from '@/lib/i18n/client'
+import { fillTemplate } from '@/lib/i18n/format'
+import type { PNLCalendarDay, PnlSnapshotCalendar } from '@/lib/types'
+import { earliestCalendarYear, zeroFillMonthDays, zeroFillYearMonths } from '@/lib/pnl/snapshotView'
+import { mondayIndex, toDayKey, vietnamDateParts } from '@/lib/time/dayBoundary'
 
 type CalendarView = 'daily' | 'monthly'
-
-const MONTH_NAMES_VI = [
-  'Tháng 1', 'Tháng 2', 'Tháng 3', 'Tháng 4', 'Tháng 5', 'Tháng 6',
-  'Tháng 7', 'Tháng 8', 'Tháng 9', 'Tháng 10', 'Tháng 11', 'Tháng 12',
-]
-const MIN_CALENDAR_YEAR = 2020
-
-const DAY_HEADERS = ['Thứ 2', 'Thứ 3', 'Thứ 4', 'Thứ 5', 'Thứ 6', 'Thứ 7', 'Chủ nhật']
 
 function IconLeft(): React.JSX.Element {
   return (
@@ -62,59 +58,32 @@ function pnlColor(pnl: number, hasData: boolean): string {
 }
 
 type PNLCalendarProps = {
-  segment: TradeSegment
-  exchange: 'all' | Exchange
+  calendar: PnlSnapshotCalendar
 }
 
-export function PNLCalendar({ segment, exchange }: PNLCalendarProps): React.JSX.Element {
-  const now = new Date()
+export function PNLCalendar({ calendar }: PNLCalendarProps): React.JSX.Element {
+  const { t } = useT()
+  const cal = t.calendar
+  const opened = vietnamDateParts(new Date())
   const [view, setView] = useState<CalendarView>('daily')
-  const [year, setYear] = useState(now.getFullYear())
-  const [month, setMonth] = useState(now.getMonth() + 1)
-  const [days, setDays] = useState<PNLCalendarDay[]>([])
-  const [months, setMonths] = useState<PNLCalendarMonth[]>([])
-  const [loading, setLoading] = useState(false)
+  const [year, setYear] = useState(opened.year)
+  const [month, setMonth] = useState(opened.month)
+  const days = useMemo(() => zeroFillMonthDays(calendar.days, year, month), [calendar.days, year, month])
+  const months = useMemo(() => zeroFillYearMonths(calendar.months, year), [calendar.months, year])
   const yearOptions = useMemo(() => {
-    const currentYear = new Date().getFullYear()
+    const currentYear = vietnamDateParts(new Date()).year
+    const firstYear = earliestCalendarYear(calendar.months, currentYear)
     const options: number[] = []
 
-    for (let y = currentYear; y >= MIN_CALENDAR_YEAR; y -= 1) {
+    for (let y = currentYear; y >= firstYear; y -= 1) {
       options.push(y)
     }
 
     return options
-  }, [])
-
-  const fetchCalendarData = useCallback(async (): Promise<void> => {
-    setLoading(true)
-    const params = new URLSearchParams({ view, year: String(year), segment })
-    if (view === 'daily') params.set('month', String(month))
-    if (exchange !== 'all') params.set('exchange', exchange)
-
-    try {
-      const res = await fetch(`/api/pnl/calendar?${params}`)
-      if (res.ok) {
-        const data = await res.json()
-        if (data.success) {
-          if (view === 'daily') setDays(data.data ?? [])
-          else setMonths(data.data ?? [])
-        }
-      }
-    } catch {
-      // silent fail
-    } finally {
-      setLoading(false)
-    }
-  }, [view, year, month, segment, exchange])
-
-  useEffect(() => {
-    fetchCalendarData()
-  }, [fetchCalendarData])
+  }, [calendar.months])
 
   const buildRows = (): Array<PNLCalendarDay | null>[] => {
-    if (days.length === 0) return []
-    const firstDay = new Date(year, month - 1, 1)
-    const startDayOfWeek = (firstDay.getDay() + 6) % 7
+    const startDayOfWeek = mondayIndex(year, month, 1)
     const cells: Array<PNLCalendarDay | null> = [
       ...Array(startDayOfWeek).fill(null),
       ...days,
@@ -128,19 +97,19 @@ export function PNLCalendar({ segment, exchange }: PNLCalendarProps): React.JSX.
   }
 
   const isPastOrToday = (dateStr: string): boolean => {
-    const today = new Date()
-    today.setHours(23, 59, 59, 999)
-    return new Date(dateStr) <= today
+    const today = toDayKey(new Date()) ?? ''
+    return dateStr <= today
   }
 
   const isPastMonth = (m: number): boolean => {
-    const today = new Date()
-    return year < today.getFullYear() || (year === today.getFullYear() && m <= today.getMonth() + 1)
+    const today = vietnamDateParts(new Date())
+    return year < today.year || (year === today.year && m <= today.month)
   }
 
   const isAtCurrentPeriod = (): boolean => {
-    if (view === 'daily') return year === now.getFullYear() && month === now.getMonth() + 1
-    return year === now.getFullYear()
+    const today = vietnamDateParts(new Date())
+    if (view === 'daily') return year === today.year && month === today.month
+    return year === today.year
   }
 
   const goBack = (): void => {
@@ -172,13 +141,14 @@ export function PNLCalendar({ segment, exchange }: PNLCalendarProps): React.JSX.
 
   const handleViewChange = (v: CalendarView): void => {
     setView(v)
-    if (v === 'daily' && month === 0) setMonth(now.getMonth() + 1)
+    if (v === 'daily' && month === 0) setMonth(vietnamDateParts(new Date()).month)
   }
 
   const handleMonthSelectChange = (event: React.ChangeEvent<HTMLSelectElement>): void => {
     const selectedMonth = Number(event.target.value)
-    const currentYear = now.getFullYear()
-    const currentMonth = now.getMonth() + 1
+    const today = vietnamDateParts(new Date())
+    const currentYear = today.year
+    const currentMonth = today.month
 
     if (year === currentYear && selectedMonth > currentMonth) {
       setMonth(currentMonth)
@@ -190,8 +160,9 @@ export function PNLCalendar({ segment, exchange }: PNLCalendarProps): React.JSX.
 
   const handleYearSelectChange = (event: React.ChangeEvent<HTMLSelectElement>): void => {
     const selectedYear = Number(event.target.value)
-    const currentYear = now.getFullYear()
-    const currentMonth = now.getMonth() + 1
+    const today = vietnamDateParts(new Date())
+    const currentYear = today.year
+    const currentMonth = today.month
 
     if (view === 'monthly') {
       setYear(Math.min(selectedYear, currentYear))
@@ -237,7 +208,7 @@ export function PNLCalendar({ segment, exchange }: PNLCalendarProps): React.JSX.
                   : 'text-slate-500 hover:text-slate-300 border border-transparent'
               }`}
             >
-              Lợi nhuận hàng ngày
+              {cal.daily}
             </button>
             <button
               onClick={() => handleViewChange('monthly')}
@@ -247,7 +218,7 @@ export function PNLCalendar({ segment, exchange }: PNLCalendarProps): React.JSX.
                   : 'text-slate-500 hover:text-slate-300 border border-transparent'
               }`}
             >
-              Lợi nhuận hàng tháng
+              {cal.monthly}
             </button>
           </div>
         </div>
@@ -256,18 +227,20 @@ export function PNLCalendar({ segment, exchange }: PNLCalendarProps): React.JSX.
           <button
             onClick={goBack}
             className="p-1.5 rounded hover:bg-primary/10 text-slate-400 hover:text-primary transition-colors"
-            aria-label="Previous"
+            aria-label={cal.previous}
           >
             <IconLeft />
           </button>
           <span className="text-sm font-bold min-w-[110px] text-center flex-1">
-            {view === 'daily' ? `${MONTH_NAMES_VI[month - 1]} ${year}` : `Năm ${year}`}
+            {view === 'daily'
+              ? `${cal.months[month - 1]} ${year}`
+              : fillTemplate(cal.yearLabel, { year })}
           </span>
           <button
             onClick={goForward}
             disabled={isAtCurrentPeriod()}
             className="p-1.5 rounded hover:bg-primary/10 text-slate-400 hover:text-primary transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-            aria-label="Next"
+            aria-label={cal.next}
           >
             <IconRight />
           </button>
@@ -280,7 +253,7 @@ export function PNLCalendar({ segment, exchange }: PNLCalendarProps): React.JSX.
               onChange={handleMonthSelectChange}
               className="h-8 rounded-lg border border-slate-200 dark:border-primary/20 bg-white dark:bg-background-dark px-2 text-xs font-semibold text-slate-700 dark:text-slate-200 min-w-[110px]"
             >
-              {MONTH_NAMES_VI.map((label, index) => {
+              {cal.months.map((label, index) => {
                 const optionMonth = index + 1
                 return (
                   <option key={label} value={optionMonth}>
@@ -307,10 +280,10 @@ export function PNLCalendar({ segment, exchange }: PNLCalendarProps): React.JSX.
 
       {view === 'daily' && (
         <div className="overflow-x-auto">
-          <table className="w-full border-collapse table-fixed min-w-[320px]">
+          <table className="w-full border-collapse table-fixed min-w-[280px]">
             <thead>
               <tr>
-                {DAY_HEADERS.map((h) => (
+                {cal.weekdays.map((h) => (
                   <th
                     key={h}
                     className="py-2 px-1 text-[10px] sm:text-[11px] text-slate-500 font-bold text-center"
@@ -391,7 +364,7 @@ export function PNLCalendar({ segment, exchange }: PNLCalendarProps): React.JSX.
                 }`}
               >
                 <p className="text-[11px] text-slate-500 font-bold mb-2">
-                  {MONTH_NAMES_VI[m.month - 1]}
+                  {cal.months[m.month - 1]}
                 </p>
                 {active ? (
                   <>
@@ -399,7 +372,7 @@ export function PNLCalendar({ segment, exchange }: PNLCalendarProps): React.JSX.
                       {hasData ? formatPNL(m.pnl) : '0.0000 USDT'}
                     </span>
                     {m.tradeCount > 0 && (
-                      <p className="text-[10px] text-slate-600 mt-1">{m.tradeCount} trades</p>
+                      <p className="text-[10px] text-slate-600 mt-1">{fillTemplate(cal.trades, { count: m.tradeCount })}</p>
                     )}
                   </>
                 ) : (
@@ -411,11 +384,6 @@ export function PNLCalendar({ segment, exchange }: PNLCalendarProps): React.JSX.
         </div>
       )}
 
-      {loading && (
-        <div className="absolute inset-0 flex items-center justify-center bg-background-dark/60 rounded-xl">
-          <span className="text-slate-400 text-sm animate-pulse">Đang tải...</span>
-        </div>
-      )}
     </div>
   )
 }

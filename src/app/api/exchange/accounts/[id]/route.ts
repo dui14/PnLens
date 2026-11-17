@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createSupabaseServerClient } from '@/lib/db/supabase-server'
 import { removeExchangeAccount, toggleExchangeActive, updateExchangeApiKeys } from '@/lib/services/exchangeService'
-import { UpdateExchangeActiveSchema, UpdateExchangeKeysSchema } from '@/lib/validators/exchange'
+import { UpdateExchangeActiveSchema, UpdateExchangeKeysSchema, exchangeKeyErrorCode } from '@/lib/validators/exchange'
 import { consumeValidationAttempt } from '@/lib/security/validationAttemptLimit'
 
 async function getAuthenticatedUser(supabase: Awaited<ReturnType<typeof createSupabaseServerClient>>) {
@@ -110,7 +110,7 @@ export async function PUT(
   const parsed = UpdateExchangeKeysSchema.safeParse(body)
   if (!parsed.success) {
     return NextResponse.json(
-      { success: false, data: null, error: 'VALIDATION_ERROR' },
+      { success: false, data: null, error: exchangeKeyErrorCode(parsed.error) },
       { status: 400 }
     )
   }
@@ -130,7 +130,7 @@ export async function PUT(
     user.id,
     id,
     apiKey,
-    apiSecret,
+    apiSecret ?? '',
     passphrase,
     label === undefined ? undefined : (label ?? undefined)
   )
@@ -142,6 +142,8 @@ export async function PUT(
       INVALID_KEY: 400,
       INVALID_API_KEY: 400,
       INVALID_SECRET_OR_PASSPHRASE: 400,
+      PRIVATE_KEY_INVALID: 400,
+      PRIVATE_KEY_ALGORITHM_UNSUPPORTED: 400,
       IP_NOT_WHITELISTED: 400,
       TRADE_PERMISSION_DETECTED: 400,
       WITHDRAW_PERMISSION_DETECTED: 400,

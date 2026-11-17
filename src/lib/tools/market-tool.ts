@@ -349,7 +349,7 @@ async function fetchYahooQuotes(symbols: string[]): Promise<{
     const response = await fetch(`${QUOTE_API_URL}?symbols=${encodeURIComponent(query)}`, {
       headers: {
         Accept: 'application/json',
-        'User-Agent': 'TrackPNLPro/1.0',
+        'User-Agent': 'PnLens/1.0',
       },
       next: { revalidate: 60 },
     })

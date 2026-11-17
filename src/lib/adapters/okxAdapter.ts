@@ -1,3 +1,4 @@
+import { HistoryGapTracker, type HistoryGap } from './historyGaps'
 import type {
   ExchangeAdapterTrade,
   ExchangeCredentials,
@@ -16,19 +17,21 @@ import {
 import { OKX_BASE_URL as BASE_URL } from './exchangeBases'
 import { fetchExchange } from './httpClient'
 import { throwOnServerPage } from './exchangeWindowError'
+import { DAY_MS, HISTORY_RETRY, SCAN_LOOKBACK_MS } from '@/lib/scan/scanLimits'
 import {
   TradeRejectCounter,
   addDecimals,
   decimalOrZero,
   flexibleTimeToIso,
   isNegativeDecimal,
+  negateDecimal,
   optionalDecimal,
   requiredDecimal,
   type TradeRejectCounts,
 } from './tradeFields'
 const REQUEST_TIMEOUT = 10_000
-const DEFAULT_LOOKBACK_MS = 365 * 24 * 60 * 60 * 1000
-const OKX_HISTORY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
+const DEFAULT_LOOKBACK_MS = SCAN_LOOKBACK_MS
+const OKX_HISTORY_WINDOW_MS = 7 * DAY_MS
 const OKX_PAGE_LIMIT = 100
 
 async function fetchWithTimeout(url: string, options?: RequestInit): Promise<Response> {
@@ -45,18 +48,39 @@ async function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-async function fetchWithRetry(url: string, options?: RequestInit, attempt = 0): Promise<Response> {
-  const response = await fetchWithTimeout(url, options)
-  if (response.status === 429 && attempt < 4) {
-    const backoff = Math.min(Math.pow(2, attempt) * 1000, 60_000)
+type RequestSource = RequestInit | (() => RequestInit)
+
+function resolveRequest(source?: RequestSource): RequestInit | undefined {
+  return typeof source === 'function' ? source() : source
+}
+
+async function fetchWithRetry(url: string, options?: RequestSource, attempt = 0): Promise<Response> {
+  const response = await fetchWithTimeout(url, resolveRequest(options))
+  if (attempt < HISTORY_RETRY.maxAttempts && (response.status === 429 || (await isBodyRateLimited(response)))) {
+    const backoff = Math.min(Math.pow(2, attempt) * HISTORY_RETRY.baseDelayMs, HISTORY_RETRY.maxDelayMs)
     await sleep(backoff + Math.random() * 500)
     return fetchWithRetry(url, options, attempt + 1)
   }
   return response
 }
 
+async function isBodyRateLimited(response: Response): Promise<boolean> {
+  try {
+    const body = (await response.clone().json()) as { code?: string }
+    return body?.code === HISTORY_RETRY.okxRateLimitCode
+  } catch {
+    return false
+  }
+}
+
 export class OKXAdapter implements ExchangeAdapter {
   private readonly rejections = new TradeRejectCounter()
+  private readonly gaps = new HistoryGapTracker()
+
+  historyGaps(): HistoryGap[] {
+    return this.gaps.gaps
+  }
+
 
   rejectedTradeCounts(): TradeRejectCounts {
     return this.rejections.counts
@@ -82,8 +106,8 @@ export class OKXAdapter implements ExchangeAdapter {
     try {
       if (!credentials.passphrase) return probeFailure('INVALID_SECRET_OR_PASSPHRASE')
       const path = '/api/v5/account/config'
-      const headers = this.buildHeaders(credentials, 'GET', path)
-      const response = await fetchWithRetry(`${BASE_URL}${path}`, { headers })
+      const request = () => ({ headers: this.buildHeaders(credentials, 'GET', path) })
+      const response = await fetchWithRetry(`${BASE_URL}${path}`, request)
       return interpretOkxConfig(response.status, await readJson(response))
     } catch {
       return probeFailure('EXCHANGE_UNREACHABLE')
@@ -93,8 +117,8 @@ export class OKXAdapter implements ExchangeAdapter {
   async hasWithdrawPermission(credentials: ExchangeCredentials): Promise<boolean> {
     try {
       const path = '/api/v5/account/config'
-      const headers = this.buildHeaders(credentials, 'GET', path)
-      const response = await fetchWithRetry(`${BASE_URL}${path}`, { headers })
+      const request = () => ({ headers: this.buildHeaders(credentials, 'GET', path) })
+      const response = await fetchWithRetry(`${BASE_URL}${path}`, request)
       if (!response.ok) return false
       const data = (await response.json()) as { code: string; data?: Array<{ perm?: string }> }
       if (data.code !== '0') return false
@@ -110,6 +134,7 @@ export class OKXAdapter implements ExchangeAdapter {
   async fetchTrades(credentials: ExchangeCredentials, since?: Date, until?: Date): Promise<ExchangeAdapterTrade[]> {
     this.scanEndMs = until?.getTime() ?? Date.now()
     this.rejections.reset()
+    this.gaps.reset()
     const startDate = since ?? new Date(Date.now() - DEFAULT_LOOKBACK_MS)
 
     const [fillTrades, fundingTrades] = await Promise.all([
@@ -149,14 +174,14 @@ export class OKXAdapter implements ExchangeAdapter {
           })
 
           const path = `/api/v5/trade/fills-history?${query.toString()}`
-          const headers = this.buildHeaders(credentials, 'GET', path)
-          const response = await fetchWithRetry(`${BASE_URL}${path}`, { headers })
+          const request = () => ({ headers: this.buildHeaders(credentials, 'GET', path) })
+          const response = await fetchWithRetry(`${BASE_URL}${path}`, request)
 
           throwOnServerPage(response)
-          if (!response.ok) break
+          if (!response.ok) { this.gaps.record(instType.toLowerCase(), windowStart, cursorEnd); break }
 
           const payload = (await response.json()) as { code: string; data?: OKXFill[] }
-          if (payload.code !== '0') break
+          if (payload.code !== '0') { this.gaps.record(instType.toLowerCase(), windowStart, cursorEnd); break }
 
           const list = Array.isArray(payload.data) ? payload.data : []
           if (list.length === 0) break
@@ -211,14 +236,14 @@ export class OKXAdapter implements ExchangeAdapter {
         })
 
         const path = `/api/v5/account/bills-archive?${query.toString()}`
-        const headers = this.buildHeaders(credentials, 'GET', path)
-        const response = await fetchWithRetry(`${BASE_URL}${path}`, { headers })
+        const request = () => ({ headers: this.buildHeaders(credentials, 'GET', path) })
+        const response = await fetchWithRetry(`${BASE_URL}${path}`, request)
 
         throwOnServerPage(response)
-          if (!response.ok) break
+          if (!response.ok) { this.gaps.record('funding', windowStart, cursorEnd); break }
 
         const payload = (await response.json()) as { code: string; data?: OKXBill[] }
-        if (payload.code !== '0') break
+        if (payload.code !== '0') { this.gaps.record('funding', windowStart, cursorEnd); break }
 
         const list = Array.isArray(payload.data) ? payload.data : []
         if (list.length === 0) break
@@ -269,14 +294,14 @@ export class OKXAdapter implements ExchangeAdapter {
         })
 
         const path = `/api/v5/account/bills-archive?${query.toString()}`
-        const headers = this.buildHeaders(credentials, 'GET', path)
-        const response = await fetchWithRetry(`${BASE_URL}${path}`, { headers })
+        const request = () => ({ headers: this.buildHeaders(credentials, 'GET', path) })
+        const response = await fetchWithRetry(`${BASE_URL}${path}`, request)
 
         throwOnServerPage(response)
-          if (!response.ok) break
+          if (!response.ok) { this.gaps.record('bills', windowStart, cursorEnd); break }
 
         const payload = (await response.json()) as { code: string; data?: OKXBill[] }
-        if (payload.code !== '0') break
+        if (payload.code !== '0') { this.gaps.record('bills', windowStart, cursorEnd); break }
 
         const list = Array.isArray(payload.data) ? payload.data : []
         if (list.length === 0) break
@@ -310,8 +335,8 @@ export class OKXAdapter implements ExchangeAdapter {
 
   async fetchOpenPositions(credentials: ExchangeCredentials): Promise<UnrealizedPosition[]> {
     const path = '/api/v5/account/positions'
-    const headers = this.buildHeaders(credentials, 'GET', path)
-    const response = await fetchWithRetry(`${BASE_URL}${path}`, { headers })
+    const request = () => ({ headers: this.buildHeaders(credentials, 'GET', path) })
+    const response = await fetchWithRetry(`${BASE_URL}${path}`, request)
 
     if (!response.ok) return []
 
@@ -334,8 +359,8 @@ export class OKXAdapter implements ExchangeAdapter {
 
   async fetchBalances(credentials: ExchangeCredentials): Promise<AssetBalance[]> {
     const path = '/api/v5/account/balance'
-    const headers = this.buildHeaders(credentials, 'GET', path)
-    const response = await fetchWithRetry(`${BASE_URL}${path}`, { headers })
+    const request = () => ({ headers: this.buildHeaders(credentials, 'GET', path) })
+    const response = await fetchWithRetry(`${BASE_URL}${path}`, request)
 
     if (!response.ok) return []
 
@@ -406,8 +431,9 @@ export class OKXAdapter implements ExchangeAdapter {
     if (!quantity) return null
     const price = requiredDecimal(fill.fillPx, this.rejections)
     if (!price) return null
-    const fee = decimalOrZero(fill.fillFee, this.rejections)
-    if (!fee) return null
+    const signedFee = decimalOrZero(fill.fee ?? fill.fillFee, this.rejections)
+    if (!signedFee) return null
+    const fee = negateDecimal(signedFee)
     const realizedPnl = optionalDecimal(fill.fillPnl, this.rejections)
     if (realizedPnl === undefined) return null
     const instType = String(fill.instType ?? '').toUpperCase()
@@ -418,7 +444,7 @@ export class OKXAdapter implements ExchangeAdapter {
       quantity,
       price,
       fee,
-      fee_currency: fill.fillFeeCcy ?? 'USDT',
+      fee_currency: fill.feeCcy ?? fill.fillFeeCcy ?? 'USDT',
       realized_pnl: realizedPnl,
       funding_fee: '0',
       income_type: fill.execType ?? null,
@@ -503,6 +529,8 @@ type OKXFill = {
   side?: string
   fillSz?: string
   fillPx?: string
+  fee?: string
+  feeCcy?: string
   fillFee?: string
   fillFeeCcy?: string
   fillPnl?: string

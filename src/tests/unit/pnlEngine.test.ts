@@ -33,19 +33,6 @@ function trade(overrides: Partial<Trade> = {}): Trade {
   }
 }
 
-function localDayKey(iso: string): string {
-  const date = new Date(iso)
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  return `${year}-${month}-${day}`
-}
-
-function localHourKey(iso: string): string {
-  const date = new Date(iso)
-  return `${localDayKey(iso)} ${String(date.getHours()).padStart(2, '0')}:00`
-}
-
 describe('calculatePNLSummary', () => {
   it('returns zeros for an empty trade list', () => {
     expect(calculatePNLSummary([], 'all')).toEqual({
@@ -207,7 +194,7 @@ describe('buildPNLTimeSeries', () => {
     vi.useRealTimers()
   })
 
-  it('places pnl on the local hour and drops trades outside the 24 hour window', () => {
+  it('places pnl on the Vietnam hour and drops trades outside that day', () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date(FROZEN_NOW))
 
@@ -226,12 +213,11 @@ describe('buildPNLTimeSeries', () => {
     const hit = points.filter((point) => point.pnl !== 0)
     expect(hit).toEqual([
       {
-        date: localHourKey(inside),
+        date: '2026-06-15 17:00',
         pnl: 4.5,
         cumulative_pnl: 4.5,
       },
     ])
-    expect(localHourKey(inside)).toBe('2026-06-15 17:00')
     expect(new Date(inside).getUTCHours()).toBe(10)
   })
 
@@ -241,7 +227,6 @@ describe('buildPNLTimeSeries', () => {
     const tradedAt = '2026-01-01T20:30:00.000Z'
 
     expect(new Date(tradedAt).getUTCDate()).toBe(1)
-    expect(localDayKey(tradedAt)).toBe('2026-01-02')
 
     const points = buildPNLTimeSeries(
       [trade({ realized_pnl: 7, traded_at: tradedAt })],
@@ -279,7 +264,8 @@ describe('buildPNLTimeSeries', () => {
       'year'
     )
 
-    expect(points).toHaveLength(12)
+    expect(points).toHaveLength(6)
+    expect(points[0]?.date).toBe('2026-01')
     const june = points.find((point) => point.date === '2026-06')
     expect(june?.pnl).toBe(parseFloat((1.234567895).toFixed(8)))
     expect(june?.cumulative_pnl).toBe(june?.pnl)
@@ -345,46 +331,26 @@ describe('getDateRangeForPeriod', () => {
     vi.useRealTimers()
   })
 
-  it('returns a local rolling window ending at the current instant', () => {
+  it('returns the Vietnam calendar window ending at the current instant', () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date(FROZEN_NOW))
 
-    const endDate = new Date(FROZEN_NOW).toISOString()
-    const dayStart = new Date(FROZEN_NOW)
-    dayStart.setHours(0, 0, 0, 0)
-    const weekStart = new Date(FROZEN_NOW)
-    weekStart.setDate(weekStart.getDate() - 7)
-    const monthStart = new Date(FROZEN_NOW)
-    monthStart.setDate(monthStart.getDate() - 30)
-    const yearStart = new Date(FROZEN_NOW)
-    yearStart.setFullYear(yearStart.getFullYear() - 1)
-
+    const endDate = FROZEN_NOW
     expect(getDateRangeForPeriod('day')).toEqual({
-      startDate: dayStart.toISOString(),
+      startDate: '2026-06-14T17:00:00.000Z',
       endDate,
     })
     expect(getDateRangeForPeriod('week')).toEqual({
-      startDate: weekStart.toISOString(),
+      startDate: '2026-06-14T17:00:00.000Z',
       endDate,
     })
     expect(getDateRangeForPeriod('month')).toEqual({
-      startDate: monthStart.toISOString(),
+      startDate: '2026-05-31T17:00:00.000Z',
       endDate,
     })
     expect(getDateRangeForPeriod('year')).toEqual({
-      startDate: yearStart.toISOString(),
+      startDate: '2025-12-31T17:00:00.000Z',
       endDate,
     })
-    expect(getDateRangeForPeriod('day').startDate).toBe('2026-06-14T17:00:00.000Z')
-    expect(getDateRangeForPeriod('year').startDate).toBe('2025-06-15T10:30:00.000Z')
-  })
-
-  it('leaves startDate unset for an unknown range', () => {
-    vi.useFakeTimers()
-    vi.setSystemTime(new Date(FROZEN_NOW))
-
-    const range = getDateRangeForPeriod('nope' as 'day')
-    expect(range.endDate).toBe(FROZEN_NOW)
-    expect(range.startDate).toBeUndefined()
   })
 })

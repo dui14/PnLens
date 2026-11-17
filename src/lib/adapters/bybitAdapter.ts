@@ -1,4 +1,5 @@
-import { createHmac } from 'crypto'
+import { HistoryGapTracker, type HistoryGap } from './historyGaps'
+import { keyObjectFromSecret, signAsymmetricKey } from './pemPrivateKey'
 import type {
   ExchangeAdapterTrade,
   ExchangeCredentials,
@@ -26,17 +27,24 @@ import {
 } from './tradeFields'
 
 import { BYBIT_BASE_URL as BASE_URL } from './exchangeBases'
+import { DAY_MS, HISTORY_RETRY, SCAN_LOOKBACK_MS } from '@/lib/scan/scanLimits'
 const REQUEST_TIMEOUT = 10_000
 const RECV_WINDOW = '5000'
-const DEFAULT_LOOKBACK_MS = 365 * 24 * 60 * 60 * 1000
-const BYBIT_HISTORY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
+const DEFAULT_LOOKBACK_MS = SCAN_LOOKBACK_MS
+const BYBIT_HISTORY_WINDOW_MS = 7 * DAY_MS
 
 function sign(apiKey: string, secret: string, timestamp: number, queryString: string): string {
   const payload = `${timestamp}${apiKey}${RECV_WINDOW}${queryString}`
-  return createHmac('sha256', secret).update(payload).digest('hex')
+  return signAsymmetricKey('bybit', payload, keyObjectFromSecret(secret))
 }
 
 type RequestInitWithProxy = RequestInit & { proxy?: string | null }
+
+type RequestSource = RequestInit | (() => RequestInit)
+
+function resolveRequest(source?: RequestSource): RequestInit | undefined {
+  return typeof source === 'function' ? source() : source
+}
 
 async function fetchWithTimeout(url: string, options?: RequestInitWithProxy): Promise<Response> {
   const controller = new AbortController()
@@ -58,30 +66,47 @@ async function sleep(ms: number): Promise<void> {
 
 async function fetchWithRetry(
   url: string,
-  options?: RequestInitWithProxy,
+  options?: RequestSource,
   attempt = 0,
   proxy?: string | null
 ): Promise<Response> {
+  const resolved = resolveRequest(options)
   const response = await fetchWithTimeout(
     url,
     proxy
       ? ({
-          ...(options ?? {}),
+          ...(resolved ?? {}),
           proxy,
         } as RequestInitWithProxy)
-      : options
+      : resolved
   )
-  if (response.status === 429 && attempt < 4) {
-    const backoff = Math.min(Math.pow(2, attempt) * 1000, 60_000)
+  if (attempt < HISTORY_RETRY.maxAttempts && (response.status === 429 || (await isBodyRateLimited(response)))) {
+    const backoff = Math.min(Math.pow(2, attempt) * HISTORY_RETRY.baseDelayMs, HISTORY_RETRY.maxDelayMs)
     await sleep(backoff + Math.random() * 500)
     return fetchWithRetry(url, options, attempt + 1, proxy)
   }
   return response
 }
 
+async function isBodyRateLimited(response: Response): Promise<boolean> {
+  if (!response.ok) return false
+  try {
+    const body = (await response.clone().json()) as { retCode?: number }
+    return body?.retCode === HISTORY_RETRY.bybitRateLimitCode
+  } catch {
+    return false
+  }
+}
+
 export class BybitAdapter implements ExchangeAdapter {
   private proxy: string | null = null
   private readonly rejections = new TradeRejectCounter()
+  private readonly gaps = new HistoryGapTracker()
+
+  historyGaps(): HistoryGap[] {
+    return this.gaps.gaps
+  }
+
 
   rejectedTradeCounts(): TradeRejectCounts {
     return this.rejections.counts
@@ -94,7 +119,7 @@ export class BybitAdapter implements ExchangeAdapter {
     return fn()
   }
 
-  private async fetchWithRetry(url: string, options?: RequestInit): Promise<Response> {
+  private async fetchWithRetry(url: string, options?: RequestSource): Promise<Response> {
     return fetchWithRetry(url, options, 0, this.proxy)
   }
 
@@ -104,19 +129,22 @@ export class BybitAdapter implements ExchangeAdapter {
     return {
       'X-BAPI-API-KEY': credentials.apiKey,
       'X-BAPI-SIGN': signature,
-      'X-BAPI-SIGN-TYPE': '2',
       'X-BAPI-TIMESTAMP': String(timestamp),
       'X-BAPI-RECV-WINDOW': RECV_WINDOW,
     }
   }
 
   async validateCredentials(credentials: ExchangeCredentials): Promise<CredentialProbeResult> {
+    if (!credentials.apiSecret.trim()) return probeFailure('INVALID_SECRET_OR_PASSPHRASE')
     try {
       const queryString = ''
-      const headers = this.buildHeaders(credentials, queryString)
-      const response = await fetchWithRetry(`${BASE_URL}/v5/user/query-api`, { headers }, 0, null)
+      const request = () => ({ headers: this.buildHeaders(credentials, queryString) })
+      const response = await fetchWithRetry(`${BASE_URL}/v5/user/query-api`, request, 0, null)
       return interpretBybitQueryApi(response.status, await readJson(response))
-    } catch {
+    } catch (error) {
+      if (error instanceof Error && error.message === 'UNSUPPORTED_SIGNING_KEY') {
+        return probeFailure('INVALID_SECRET_OR_PASSPHRASE')
+      }
       return probeFailure('EXCHANGE_UNREACHABLE')
     }
   }
@@ -125,8 +153,8 @@ export class BybitAdapter implements ExchangeAdapter {
     return this.withProxy(credentials, async () => {
       try {
         const queryString = ''
-        const headers = this.buildHeaders(credentials, queryString)
-        const response = await this.fetchWithRetry(`${BASE_URL}/v5/user/query-api`, { headers })
+        const request = () => ({ headers: this.buildHeaders(credentials, queryString) })
+        const response = await this.fetchWithRetry(`${BASE_URL}/v5/user/query-api`, request)
         if (!response.ok) return false
         const data = (await response.json()) as { retCode: number; result?: { permissions?: { Withdraw?: boolean } } }
         if (data.retCode !== 0) return false
@@ -142,6 +170,7 @@ export class BybitAdapter implements ExchangeAdapter {
   async fetchTrades(credentials: ExchangeCredentials, since?: Date, until?: Date): Promise<ExchangeAdapterTrade[]> {
     this.scanEndMs = until?.getTime() ?? Date.now()
     this.rejections.reset()
+    this.gaps.reset()
     return this.withProxy(credentials, async () => {
       const startTime = since ? since.getTime() : Date.now() - DEFAULT_LOOKBACK_MS
       const now = this.scanEndMs
@@ -171,16 +200,16 @@ export class BybitAdapter implements ExchangeAdapter {
               if (cursor) query.set('cursor', cursor)
 
               const queryString = query.toString()
-              const headers = this.buildHeaders(credentials, queryString)
-              const response = await this.fetchWithRetry(`${BASE_URL}/v5/execution/list?${queryString}`, { headers })
+              const request = () => ({ headers: this.buildHeaders(credentials, queryString) })
+              const response = await this.fetchWithRetry(`${BASE_URL}/v5/execution/list?${queryString}`, request)
               throwOnServerPage(response)
-          if (!response.ok) break
+          if (!response.ok) { this.gaps.record(category, windowStart, windowEnd); break }
 
               const data = (await response.json()) as {
                 retCode: number
                 result?: { list?: BybitTrade[]; nextPageCursor?: string }
               }
-              if (data.retCode !== 0) break
+              if (data.retCode !== 0) { this.gaps.record(category, windowStart, windowEnd); break }
 
               const pageTrades = data.result?.list ?? []
               for (const trade of pageTrades) {
@@ -225,8 +254,8 @@ export class BybitAdapter implements ExchangeAdapter {
   async fetchOpenPositions(credentials: ExchangeCredentials): Promise<UnrealizedPosition[]> {
     return this.withProxy(credentials, async () => {
       const queryString = 'category=linear&settleCoin=USDT'
-      const headers = this.buildHeaders(credentials, queryString)
-      const response = await this.fetchWithRetry(`${BASE_URL}/v5/position/list?${queryString}`, { headers })
+      const request = () => ({ headers: this.buildHeaders(credentials, queryString) })
+      const response = await this.fetchWithRetry(`${BASE_URL}/v5/position/list?${queryString}`, request)
 
       if (!response.ok) return []
 
@@ -251,8 +280,8 @@ export class BybitAdapter implements ExchangeAdapter {
   async fetchBalances(credentials: ExchangeCredentials): Promise<AssetBalance[]> {
     return this.withProxy(credentials, async () => {
       const queryString = 'accountType=UNIFIED'
-      const headers = this.buildHeaders(credentials, queryString)
-      const response = await this.fetchWithRetry(`${BASE_URL}/v5/account/wallet-balance?${queryString}`, { headers })
+      const request = () => ({ headers: this.buildHeaders(credentials, queryString) })
+      const response = await this.fetchWithRetry(`${BASE_URL}/v5/account/wallet-balance?${queryString}`, request)
 
       if (!response.ok) return []
 
@@ -336,19 +365,17 @@ export class BybitAdapter implements ExchangeAdapter {
         if (cursor) query.set('cursor', cursor)
 
         const queryString = query.toString()
-        const headers = this.buildHeaders(credentials, queryString)
-        const response = await this.fetchWithRetry(`${BASE_URL}/v5/position/closed-pnl?${queryString}`, {
-          headers,
-        })
+        const request = () => ({ headers: this.buildHeaders(credentials, queryString) })
+        const response = await this.fetchWithRetry(`${BASE_URL}/v5/position/closed-pnl?${queryString}`, request)
 
         throwOnServerPage(response)
-          if (!response.ok) break
+          if (!response.ok) { this.gaps.record(`closed_pnl_${category}`, windowStart, windowEnd); break }
 
         const data = (await response.json()) as {
           retCode: number
           result?: { list?: BybitClosedPnl[]; nextPageCursor?: string }
         }
-        if (data.retCode !== 0) break
+        if (data.retCode !== 0) { this.gaps.record(`closed_pnl_${category}`, windowStart, windowEnd); break }
 
         const list = data.result?.list ?? []
         if (list.length === 0) break

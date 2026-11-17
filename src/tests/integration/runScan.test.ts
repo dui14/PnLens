@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ExchangeWindowError } from '@/lib/adapters/exchangeWindowError'
 import type { ExchangeAdapterTrade } from '@/lib/types'
-import { buildScanWindows } from '@/lib/scan/scanLimits'
+import { EXCHANGE_SCAN_LIMITS, buildScanWindows } from '@/lib/scan/scanLimits'
 import { runScan } from '@/lib/scan/runScan'
 
 const state = vi.hoisted(() => ({
@@ -21,9 +21,12 @@ const state = vi.hoisted(() => ({
   lastSynced: 0,
   upserts: [] as ExchangeAdapterTrade[][],
   rejected: { INVALID_TIMESTAMP: 0, INVALID_NUMBER: 0, MISSING_ID: 0 },
+  gaps: [] as Array<{ market: string; startMs: number; endMs: number }>,
 }))
 
 const fetchTrades = vi.hoisted(() => vi.fn())
+const setKnownSpotSymbols = vi.hoisted(() => vi.fn())
+const knownSymbols = vi.hoisted(() => ({ value: [] as string[] }))
 
 vi.mock('@/lib/db/exchangeDb', () => ({
   getExchangeAccountByAccountId: vi.fn(async () => state.account),
@@ -50,6 +53,7 @@ vi.mock('@/lib/adapters/encryption', () => ({
 }))
 
 vi.mock('@/lib/db/tradesDb', () => ({
+  getKnownSpotSymbols: vi.fn(async () => knownSymbols.value),
   upsertTrades: vi.fn(async (_client: unknown, _accountId: string, _userId: string, trades: ExchangeAdapterTrade[]) => {
     state.upserts.push(trades)
     return trades.length
@@ -59,7 +63,9 @@ vi.mock('@/lib/db/tradesDb', () => ({
 vi.mock('@/lib/adapters/exchangeFactory', () => ({
   createExchangeAdapter: vi.fn(async () => ({
     fetchTrades,
+    setKnownSpotSymbols,
     rejectedTradeCounts: () => ({ ...state.rejected }),
+    historyGaps: () => state.gaps,
   })),
 }))
 
@@ -84,6 +90,7 @@ const now = new Date('2026-06-01T00:00:00.000Z')
 
 describe('runScan', () => {
   beforeEach(() => {
+    state.gaps = []
     state.statuses = []
     state.lastSynced = 0
     state.upserts = []
@@ -111,7 +118,7 @@ describe('runScan', () => {
     const result = await runScan('account-1', {
       now,
       client: {} as never,
-      limits: { maxLookbackDays: 2, windowDays: null, pageSize: 100 },
+      limits: { maxLookbackDays: 400, windowDays: null, pageSize: 100 },
     })
 
     expect(result.sync_status).toBe('synced')
@@ -119,6 +126,23 @@ describe('runScan', () => {
     expect(result.sync_error).toBe('ROWS_SKIPPED:1')
     expect(state.lastSynced).toBe(1)
     expect(fetchTrades.mock.calls[0]?.[0]).toEqual({ apiKey: 'key', apiSecret: 'secret', passphrase: undefined })
+  })
+
+  it('finishes synced with PARTIAL_HISTORY when a window failed softly', async () => {
+    fetchTrades.mockResolvedValue([fill('spot_1')])
+    state.gaps = [
+      { market: 'spot', startMs: Date.UTC(2026, 0, 1), endMs: Date.UTC(2026, 0, 8) },
+      { market: 'spot', startMs: Date.UTC(2026, 0, 15), endMs: Date.UTC(2026, 0, 22) },
+    ]
+
+    const result = await runScan('account-1', {
+      now,
+      client: {} as never,
+      limits: { maxLookbackDays: 400, windowDays: null, pageSize: 100 },
+    })
+
+    expect(result.sync_status).toBe('synced')
+    expect(result.sync_error).toBe('PARTIAL_HISTORY:spot:2026-01-01:2026-01-22')
   })
 
   it('fails a window whose rows are all rejected without deleting earlier rows', async () => {
@@ -156,23 +180,47 @@ describe('runScan', () => {
 })
 
 describe('buildScanWindows', () => {
-  it('warns when last_synced is older than a known maximum', () => {
-    const plan = buildScanWindows({
-      now,
-      lastSynced: '2024-01-01T00:00:00.000Z',
-      limits: { maxLookbackDays: 90, windowDays: null, pageSize: null },
-    })
-    expect(plan.warnings).toContain('COVERAGE_GAP')
-    expect(plan.windows[0]?.start.toISOString()).toBe(new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000).toISOString())
+  const day = 24 * 60 * 60 * 1000
+
+  it('always starts at now minus the venue maximum lookback', () => {
+    for (const exchange of Object.keys(EXCHANGE_SCAN_LIMITS) as Array<keyof typeof EXCHANGE_SCAN_LIMITS>) {
+      const limits = EXCHANGE_SCAN_LIMITS[exchange]
+      const plan = buildScanWindows({ now, limits })
+      expect(plan.windows).toHaveLength(1)
+      expect(plan.windows[0]?.start.getTime()).toBe(now.getTime() - limits.maxLookbackDays * day)
+      expect(plan.windows[0]?.end.getTime()).toBe(now.getTime())
+      expect(plan.warnings).toEqual([])
+    }
   })
 
-  it('warns when the guide has no maximum and still requests one year', () => {
-    const plan = buildScanWindows({
-      now,
-      lastSynced: null,
-      limits: { maxLookbackDays: null, windowDays: null, pageSize: 1000 },
-    })
-    expect(plan.warnings).toEqual(['LOOKBACK_UNVERIFIED'])
-    expect(plan.windows).toHaveLength(1)
+  it('splits the range into windows when windowDays is set', () => {
+    const plan = buildScanWindows({ now, limits: { maxLookbackDays: 3, windowDays: 1, pageSize: null } })
+    expect(plan.windows).toHaveLength(3)
+  })
+})
+
+describe('runScan full lookback', () => {
+  beforeEach(() => {
+    state.gaps = []
+    state.rejected = { INVALID_TIMESTAMP: 0, INVALID_NUMBER: 0, MISSING_ID: 0 }
+    state.account.last_synced = null
+    fetchTrades.mockReset()
+  })
+
+  it('rescans the full lookback even when last_synced is set', async () => {
+    fetchTrades.mockResolvedValue([fill('spot_1')])
+    state.account.last_synced = '2026-05-31T00:00:00.000Z'
+    await runScan('account-1', { now, client: {} as never, limits: { maxLookbackDays: 90, windowDays: null, pageSize: 100 } })
+    const start = fetchTrades.mock.calls[0]?.[1] as Date
+    expect(start.toISOString()).toBe(new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000).toISOString())
+  })
+
+  it('passes the symbols already stored for the account to the adapter', async () => {
+    fetchTrades.mockResolvedValue([])
+    setKnownSpotSymbols.mockReset()
+    knownSymbols.value = ['NVDABUSDT', 'BTCUSDT']
+    await runScan('account-1', { now, client: {} as never, limits })
+    expect(setKnownSpotSymbols).toHaveBeenCalledWith(['NVDABUSDT', 'BTCUSDT'])
+    knownSymbols.value = []
   })
 })

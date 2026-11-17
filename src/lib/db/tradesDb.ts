@@ -1,5 +1,6 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
-import type { Exchange, ExchangeAdapterTrade, Trade } from '@/lib/types'
+import type { Exchange, ExchangeAdapterTrade, Result, Trade } from '@/lib/types'
+import { encodeTradeCursor, keysetFilter, type TradeCursor } from '@/lib/pagination/tradeCursor'
 
 type TradeTypeFilter = 'spot' | 'futures'
 
@@ -11,6 +12,9 @@ type TradeReadFilter = {
 }
 
 const TRADE_QUERY_BATCH_SIZE = 1000
+const TRADES_FETCH_FAILED = 'TRADES_FETCH_FAILED'
+const PNL_TRADE_COLUMNS =
+  'id, symbol, side, quantity, price, fee, fee_currency, funding_fee, realized_pnl, trade_type, traded_at'
 
 function toFiniteNumber(value: unknown): number {
   const parsed = typeof value === 'number' ? value : Number(value ?? 0)
@@ -81,7 +85,6 @@ export async function upsertTrades(
     .from('trades')
     .upsert(rows, {
       onConflict: 'exchange_account_id,external_trade_id',
-      ignoreDuplicates: true,
     })
     .select('id')
 
@@ -110,7 +113,6 @@ export async function upsertTrades(
         .from('trades')
         .upsert(fallbackRows, {
           onConflict: 'exchange_account_id,external_trade_id',
-          ignoreDuplicates: true,
         })
         .select('id')
 
@@ -145,8 +147,8 @@ export async function getTrades(
   supabase: SupabaseClient,
   userId: string,
   options: {
-    page: number
     limit: number
+    cursor?: TradeCursor
     exchangeAccountId?: string
     symbol?: string
     tradeType?: TradeTypeFilter
@@ -154,18 +156,20 @@ export async function getTrades(
     includeInactive?: boolean
     executedOnly?: boolean
   }
-): Promise<{ trades: Trade[]; total: number }> {
-  const offset = (options.page - 1) * options.limit
-
+): Promise<{ trades: Trade[]; nextCursor: string | null }> {
   let query = supabase
     .from('trades')
     .select(
-      `id, exchange_account_id, user_id, external_trade_id, symbol, side, quantity, price, fee, fee_currency, realized_pnl, funding_fee, income_type, trade_type, traded_at, raw_data, created_at, exchange_accounts!inner(exchange,is_active)`,
-      { count: 'exact' }
+      `${PNL_TRADE_COLUMNS}, exchange_accounts!inner(exchange,is_active)`,
     )
     .eq('user_id', userId)
     .order('traded_at', { ascending: false })
-    .range(offset, offset + options.limit - 1)
+    .order('id', { ascending: false })
+    .limit(options.limit + 1)
+
+  if (options.cursor) {
+    query = query.or(keysetFilter(options.cursor, 'desc'))
+  }
 
   if (!options.includeInactive) {
     query = query.eq('exchange_accounts.is_active', true)
@@ -188,13 +192,22 @@ export async function getTrades(
     query = query.gt('quantity', 0).gt('price', 0)
   }
 
-  const { data, error, count } = await query
+  const { data, error } = await query
   if (error) {
     console.error('[tradesDb] getTrades failed:', error.message)
-    return { trades: [], total: 0 }
+    return { trades: [], nextCursor: null }
   }
 
-  const trades = (data ?? []).map((row) => {
+  const fetched = (data ?? []) as Record<string, unknown>[]
+  const hasMore = fetched.length > options.limit
+  const pageRows = hasMore ? fetched.slice(0, options.limit) : fetched
+  const lastRow = pageRows[pageRows.length - 1]
+  const nextCursor =
+    hasMore && lastRow
+      ? encodeTradeCursor({ tradedAt: String(lastRow.traded_at), id: String(lastRow.id) })
+      : null
+
+  const trades = pageRows.map((row) => {
     const record = row as Record<string, unknown>
     const accountData = record.exchange_accounts as Record<string, unknown> | Record<string, unknown>[] | null
     const exchangeRow = Array.isArray(accountData) ? accountData[0] : accountData
@@ -219,10 +232,10 @@ export async function getTrades(
     }
   }) as unknown as Trade[]
 
-  return { trades, total: count ?? 0 }
+  return { trades, nextCursor }
 }
 
-export async function getTradesForPNL(
+export async function fetchTradesForPNL(
   supabase: SupabaseClient,
   userId: string,
   options: TradeReadFilter & {
@@ -230,17 +243,22 @@ export async function getTradesForPNL(
     endDate?: string
     executedOnly?: boolean
   }
-): Promise<Trade[]> {
+): Promise<Result<Trade[]>> {
   const rows: Record<string, unknown>[] = []
-  let offset = 0
+  let cursor: TradeCursor | null = null
 
   while (true) {
     let query = supabase
       .from('trades')
-      .select('*, exchange_accounts!inner(exchange,is_active)')
+      .select(`${PNL_TRADE_COLUMNS}, exchange_accounts!inner(exchange,is_active)`)
       .eq('user_id', userId)
       .order('traded_at', { ascending: true })
       .order('id', { ascending: true })
+      .limit(TRADE_QUERY_BATCH_SIZE)
+
+    if (cursor) {
+      query = query.or(keysetFilter(cursor, 'asc'))
+    }
 
     if (!options.includeInactive) {
       query = query.eq('exchange_accounts.is_active', true)
@@ -266,11 +284,11 @@ export async function getTradesForPNL(
       query = query.gt('quantity', 0).gt('price', 0)
     }
 
-    const { data, error } = await query.range(offset, offset + TRADE_QUERY_BATCH_SIZE - 1)
+    const { data, error } = await query
 
     if (error) {
       console.error('[tradesDb] getTradesForPNL failed:', error.message)
-      return []
+      return { success: false, error: TRADES_FETCH_FAILED }
     }
 
     const pageRows = (data ?? []) as Record<string, unknown>[]
@@ -280,7 +298,8 @@ export async function getTradesForPNL(
       break
     }
 
-    offset += TRADE_QUERY_BATCH_SIZE
+    const last = pageRows[pageRows.length - 1]
+    cursor = { tradedAt: String(last.traded_at), id: String(last.id) }
   }
 
   const trades = rows.map((row) => {
@@ -308,7 +327,16 @@ export async function getTradesForPNL(
     }
   }) as unknown as Trade[]
 
-  return trades
+  return { success: true, data: trades }
+}
+
+export async function getTradesForPNL(
+  supabase: SupabaseClient,
+  userId: string,
+  options: Parameters<typeof fetchTradesForPNL>[2]
+): Promise<Trade[]> {
+  const result = await fetchTradesForPNL(supabase, userId, options)
+  return result.success ? result.data : []
 }
 
 export async function getTradeTotals(
@@ -320,14 +348,22 @@ export async function getTradeTotals(
 ): Promise<{ count: number; volumeUsd: number }> {
   let volumeUsd = 0
   let totalCount = 0
-  let offset = 0
+  let lastId = null as string | null
 
   while (true) {
+    const isFirstBatch: boolean = lastId === null
     let query = supabase
       .from('trades')
-      .select('id, quantity, price, exchange_accounts!inner(exchange,is_active)', { count: 'exact' })
+      .select('id, quantity, price, exchange_accounts!inner(exchange,is_active)', {
+        count: isFirstBatch ? 'exact' : undefined,
+      })
       .eq('user_id', userId)
       .order('id', { ascending: true })
+      .limit(TRADE_QUERY_BATCH_SIZE)
+
+    if (lastId !== null) {
+      query = query.gt('id', lastId)
+    }
 
     if (!options.includeInactive) {
       query = query.eq('exchange_accounts.is_active', true)
@@ -347,14 +383,14 @@ export async function getTradeTotals(
       query = query.gt('quantity', 0).gt('price', 0)
     }
 
-    const { data, error, count } = await query.range(offset, offset + TRADE_QUERY_BATCH_SIZE - 1)
+    const { data, error, count } = await query
 
     if (error) {
       console.error('[tradesDb] getTradeTotals failed:', error.message)
       return { count: 0, volumeUsd: 0 }
     }
 
-    if (offset === 0) {
+    if (isFirstBatch) {
       totalCount = count ?? 0
     }
 
@@ -369,7 +405,8 @@ export async function getTradeTotals(
       break
     }
 
-    offset += TRADE_QUERY_BATCH_SIZE
+    const lastRow = pageRows[pageRows.length - 1] as Record<string, unknown>
+    lastId = String(lastRow.id)
   }
 
   return {
@@ -380,6 +417,7 @@ export async function getTradeTotals(
 
 export async function deleteExchangeTrackingData(
   supabase: SupabaseClient,
+  snapshotClient: SupabaseClient,
   userId: string,
   exchangeAccountId: string
 ): Promise<boolean> {
@@ -394,11 +432,10 @@ export async function deleteExchangeTrackingData(
     return false
   }
 
-  const deleteSnapshotsResult = await supabase
+  const deleteSnapshotsResult = await snapshotClient
     .from('pnl_snapshots')
     .delete()
     .eq('user_id', userId)
-    .eq('exchange_account_id', exchangeAccountId)
 
   if (deleteSnapshotsResult.error && !hasMissingTableError(deleteSnapshotsResult.error, 'pnl_snapshots')) {
     console.error('[tradesDb] deleteExchangeTrackingData(pnl_snapshots) failed:', deleteSnapshotsResult.error.message)
@@ -406,4 +443,52 @@ export async function deleteExchangeTrackingData(
   }
 
   return true
+}
+
+const SPOT_TRADE_ID_PREFIX = 'spot_'
+
+export async function getLatestSpotTradeIdBefore(
+  supabase: SupabaseClient,
+  exchangeAccountId: string,
+  symbol: string,
+  beforeMs: number
+): Promise<number> {
+  const { data, error } = await supabase
+    .from('trades')
+    .select('external_trade_id')
+    .eq('exchange_account_id', exchangeAccountId)
+    .eq('symbol', symbol)
+    .eq('trade_type', 'spot')
+    .lt('traded_at', new Date(beforeMs).toISOString())
+    .order('traded_at', { ascending: false })
+    .limit(1)
+
+  if (error || !data || data.length === 0) return 0
+  const raw = String((data[0] as Record<string, unknown>).external_trade_id ?? '')
+  if (!raw.startsWith(SPOT_TRADE_ID_PREFIX)) return 0
+  const parsed = Number(raw.slice(SPOT_TRADE_ID_PREFIX.length))
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0
+}
+
+export async function getKnownSpotSymbols(
+  supabase: SupabaseClient,
+  exchangeAccountId: string
+): Promise<string[]> {
+  const symbols = new Set<string>()
+  for (let from = 0; ; from += TRADE_QUERY_BATCH_SIZE) {
+    const { data, error } = await supabase
+      .from('trades')
+      .select('symbol')
+      .eq('exchange_account_id', exchangeAccountId)
+      .eq('trade_type', 'spot')
+      .order('symbol', { ascending: true })
+      .order('id', { ascending: true })
+      .range(from, from + TRADE_QUERY_BATCH_SIZE - 1)
+    if (error || !data) return Array.from(symbols)
+    for (const row of data as { symbol?: unknown }[]) {
+      if (typeof row.symbol === 'string' && row.symbol.length > 0) symbols.add(row.symbol)
+    }
+    if (data.length < TRADE_QUERY_BATCH_SIZE) break
+  }
+  return Array.from(symbols)
 }

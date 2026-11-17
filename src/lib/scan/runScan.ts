@@ -2,14 +2,16 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { decrypt } from '@/lib/adapters/encryption'
 import { createExchangeAdapter } from '@/lib/adapters/exchangeFactory'
 import { ExchangeWindowError } from '@/lib/adapters/exchangeWindowError'
+import type { HistoryGap } from '@/lib/adapters/historyGaps'
 import { emptyRejectCounts, type TradeRejectCounts } from '@/lib/adapters/tradeFields'
 import { getApiKey, getExchangeAccountByAccountId, updateLastSynced, updateSyncStatus } from '@/lib/db/exchangeDb'
-import { upsertTrades } from '@/lib/db/tradesDb'
+import { getKnownSpotSymbols, getLatestSpotTradeIdBefore, upsertTrades } from '@/lib/db/tradesDb'
 import type { ExchangeAdapterTrade, ExchangeCredentials } from '@/lib/types'
 import {
   EXCHANGE_SCAN_LIMITS,
   UPSERT_BATCH_SIZE,
   buildScanWindows,
+  partialHistoryWarnings,
   scanStoredError,
   type ExchangeScanLimit,
 } from './scanLimits'
@@ -61,17 +63,24 @@ export async function runScan(accountId: string, options: RunScanOptions = {}): 
   const limits = options.limits ?? EXCHANGE_SCAN_LIMITS[account.exchange]
   const plan = buildScanWindows({
     now,
-    lastSynced: account.last_synced,
     limits,
   })
   const adapter = await createExchangeAdapter(account.exchange)
   const rejected = emptyRejectCounts()
   let syncedTrades = 0
   let newTrades = 0
+  const gaps: HistoryGap[] = []
+  adapter.setSpotResume?.((symbol, beforeMs) =>
+    getLatestSpotTradeIdBefore(client, accountId, symbol, beforeMs)
+  )
+  if (adapter.setKnownSpotSymbols) {
+    adapter.setKnownSpotSymbols(await getKnownSpotSymbols(client, accountId))
+  }
 
   try {
     for (const window of plan.windows) {
       const trades = await adapter.fetchTrades(credentials, window.start, window.end)
+      gaps.push(...(adapter.historyGaps?.() ?? []))
       const pageRejected = adapter.rejectedTradeCounts()
       addCounts(rejected, pageRejected)
       const pageRejects = totalCount(pageRejected)
@@ -89,6 +98,7 @@ export async function runScan(accountId: string, options: RunScanOptions = {}): 
   }
 
   const skipped = totalCount(rejected)
+  plan.warnings.push(...partialHistoryWarnings(gaps))
   const syncError = scanStoredError(skipped, plan.warnings)
   await updateLastSynced(client, accountId, 'synced', syncError)
   return {

@@ -1,10 +1,14 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
-import type { ExchangeAccount, ApiKeyRow, ExchangeAccountWithStats } from '@/lib/types'
+import { SECRET_FORMATS, type ExchangeAccount, type ApiKeyRow, type ExchangeAccountWithStats, type SecretFormat } from '@/lib/types'
 
 function hasMissingColumnError(error: unknown, column: string): boolean {
   if (!error || typeof error !== 'object') return false
   const message = 'message' in error ? String(error.message ?? '') : ''
   return message.includes(column) && message.toLowerCase().includes('column')
+}
+
+function secretFormatOf(value: unknown): SecretFormat | null {
+  return (SECRET_FORMATS as readonly unknown[]).includes(value) ? (value as SecretFormat) : null
 }
 
 function normalizeExchangeAccount(row: Record<string, unknown>, userId: string): ExchangeAccount {
@@ -71,12 +75,14 @@ export async function createApiKey(
   passphraseEncrypted: string | null,
   passphraseIv: string | null,
   proxyEncrypted: string | null,
-  proxyIv: string | null
+  proxyIv: string | null,
+  secretFormat: SecretFormat
 ): Promise<boolean> {
   let includePassphrase = true
   let includeProxy = true
+  let includeSecretFormat = true
 
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
     const payload: Record<string, unknown> = {
       exchange_account_id: exchangeAccountId,
       key_encrypted: keyEncrypted,
@@ -95,8 +101,14 @@ export async function createApiKey(
       payload.proxy_iv = proxyIv
     }
 
+    if (includeSecretFormat) {
+      payload.secret_format = secretFormat
+    }
+
     const result = await supabase.from('api_keys').insert(payload)
     if (!result.error) return true
+
+    const missingSecretFormatColumn = hasMissingColumnError(result.error, 'secret_format')
 
     const missingPassphraseColumn =
       hasMissingColumnError(result.error, 'passphrase_encrypted') ||
@@ -106,8 +118,12 @@ export async function createApiKey(
       hasMissingColumnError(result.error, 'proxy_encrypted') ||
       hasMissingColumnError(result.error, 'proxy_iv')
 
-    if (!missingPassphraseColumn && !missingProxyColumn) {
+    if (!missingPassphraseColumn && !missingProxyColumn && !missingSecretFormatColumn) {
       return false
+    }
+
+    if (missingSecretFormatColumn) {
+      includeSecretFormat = false
     }
 
     if (missingPassphraseColumn) {
@@ -134,13 +150,15 @@ export async function getExchangeAccounts(
 
   if (!primary.error && primary.data) {
     return primary.data.map((row) => {
-      const tradeRows = Array.isArray(row.trades) ? row.trades : []
-      const keyRows = Array.isArray(row.api_keys) ? row.api_keys : []
+      const record = row as unknown as Record<string, unknown>
+      const tradeRows = Array.isArray(record.trades) ? record.trades : []
+      const keyRows = (Array.isArray(record.api_keys) ? record.api_keys : []) as Record<string, unknown>[]
 
       return {
-        ...normalizeExchangeAccount(row as unknown as Record<string, unknown>, userId),
+        ...normalizeExchangeAccount(record, userId),
         trade_count: tradeRows.length,
         has_passphrase: keyRows.some((keyRow) => Boolean(keyRow.passphrase_encrypted)),
+        secret_format: null,
       }
     }) as ExchangeAccountWithStats[]
   }
@@ -160,8 +178,45 @@ export async function getExchangeAccounts(
       ...normalizeExchangeAccount(row as unknown as Record<string, unknown>, userId),
       trade_count: tradeRows.length,
       has_passphrase: false,
+      secret_format: null,
     }
   }) as ExchangeAccountWithStats[]
+}
+
+export type ApiKeyMetadata = {
+  secret_format: SecretFormat | null
+  has_passphrase: boolean
+}
+
+export async function getApiKeyMetadata(
+  serviceSupabase: SupabaseClient,
+  exchangeAccountIds: string[]
+): Promise<Map<string, ApiKeyMetadata>> {
+  const metadata = new Map<string, ApiKeyMetadata>()
+  if (exchangeAccountIds.length === 0) return metadata
+
+  const withFormat = await serviceSupabase
+    .from('api_keys')
+    .select('exchange_account_id, passphrase_iv, secret_format')
+    .in('exchange_account_id', exchangeAccountIds)
+
+  const result = withFormat.error && hasMissingColumnError(withFormat.error, 'secret_format')
+    ? await serviceSupabase
+        .from('api_keys')
+        .select('exchange_account_id, passphrase_iv')
+        .in('exchange_account_id', exchangeAccountIds)
+    : withFormat
+
+  if (result.error || !result.data) return metadata
+
+  for (const row of result.data as Record<string, unknown>[]) {
+    metadata.set(String(row.exchange_account_id), {
+      secret_format: secretFormatOf(row.secret_format),
+      has_passphrase: typeof row.passphrase_iv === 'string' && row.passphrase_iv.length > 0,
+    })
+  }
+
+  return metadata
 }
 
 export async function getExchangeAccountById(
@@ -375,11 +430,13 @@ export async function updateApiKeyRecord(
   keyIv: string,
   secretIv: string,
   passphraseEncrypted: string | null,
-  passphraseIv: string | null
+  passphraseIv: string | null,
+  secretFormat: SecretFormat
 ): Promise<boolean> {
   let includePassphrase = true
+  let includeSecretFormat = true
 
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
     const payload: Record<string, unknown> = {
       key_encrypted: keyEncrypted,
       secret_encrypted: secretEncrypted,
@@ -392,6 +449,10 @@ export async function updateApiKeyRecord(
       payload.passphrase_iv = passphraseIv
     }
 
+    if (includeSecretFormat) {
+      payload.secret_format = secretFormat
+    }
+
     const result = await supabase
       .from('api_keys')
       .update(payload)
@@ -402,9 +463,11 @@ export async function updateApiKeyRecord(
     const missingPassphraseColumn =
       hasMissingColumnError(result.error, 'passphrase_encrypted') ||
       hasMissingColumnError(result.error, 'passphrase_iv')
+    const missingSecretFormatColumn = hasMissingColumnError(result.error, 'secret_format')
 
-    if (!missingPassphraseColumn) return false
-    includePassphrase = false
+    if (!missingPassphraseColumn && !missingSecretFormatColumn) return false
+    if (missingPassphraseColumn) includePassphrase = false
+    if (missingSecretFormatColumn) includeSecretFormat = false
   }
 
   return false

@@ -1,3 +1,4 @@
+import type { HistoryGap } from './historyGaps'
 import type {
   ExchangeAdapterTrade,
   ExchangeCredentials,
@@ -11,6 +12,9 @@ export interface ExchangeAdapter {
   validateCredentials(credentials: ExchangeCredentials): Promise<CredentialProbeResult>
   hasWithdrawPermission(credentials: ExchangeCredentials): Promise<boolean>
   rejectedTradeCounts(): TradeRejectCounts
+  historyGaps?(): HistoryGap[]
+  setSpotResume?(resolver: (symbol: string, beforeMs: number) => Promise<number>): void
+  setKnownSpotSymbols?(symbols: string[]): void
   fetchTrades(
     credentials: ExchangeCredentials,
     since?: Date,

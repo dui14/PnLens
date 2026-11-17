@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createSupabaseServerClient } from '@/lib/db/supabase-server'
-import { ConnectExchangeSchema } from '@/lib/validators/exchange'
+import { ConnectExchangeSchema, exchangeKeyErrorCode } from '@/lib/validators/exchange'
 import { connectExchange } from '@/lib/services/exchangeService'
 import { consumeValidationAttempt } from '@/lib/security/validationAttemptLimit'
 
@@ -10,6 +10,8 @@ const CONNECT_ERROR_STATUS: Record<string, number> = {
   VALIDATION_ERROR: 400,
   INVALID_KEY: 400,
   INVALID_SECRET_OR_PASSPHRASE: 400,
+  PRIVATE_KEY_INVALID: 400,
+  PRIVATE_KEY_ALGORITHM_UNSUPPORTED: 400,
   IP_NOT_WHITELISTED: 400,
   TRADE_PERMISSION_DETECTED: 400,
   WITHDRAW_PERMISSION_DETECTED: 400,
@@ -59,7 +61,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (!parsed.success) {
     const passphraseRequired = parsed.error.issues.some((issue) => issue.message === 'PASSPHRASE_REQUIRED')
     return NextResponse.json(
-      { success: false, data: null, error: passphraseRequired ? 'PASSPHRASE_REQUIRED' : 'VALIDATION_ERROR' },
+      { success: false, data: null, error: passphraseRequired ? 'PASSPHRASE_REQUIRED' : exchangeKeyErrorCode(parsed.error) },
       { status: 400 }
     )
   }
@@ -87,7 +89,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       user.id,
       exchange,
       apiKey,
-      apiSecret,
+      apiSecret ?? '',
       passphrase,
       label
     )

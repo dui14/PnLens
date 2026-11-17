@@ -12,6 +12,7 @@ import {
   createExchangeAccount,
   createApiKey,
   getExchangeAccounts,
+  getApiKeyMetadata,
   getExchangeAccountById,
   getApiKey,
   deleteExchangeAccount,
@@ -23,14 +24,15 @@ import {
 } from '@/lib/db/exchangeDb'
 import { deleteExchangeTrackingData, upsertTrades } from '@/lib/db/tradesDb'
 import { encrypt, decrypt } from '@/lib/adapters/encryption'
+import { isAsymmetricVenue, prepareVenuePrivateKey, type SecretFormat } from '@/lib/adapters/pemPrivateKey'
 import { createExchangeAdapter, type ExchangeAdapter } from '@/lib/adapters/exchangeFactory'
 import type { CredentialProbeResult } from '@/lib/adapters/credentialValidation'
-import { SCAN_COOLDOWN_MS, SCAN_STALE_AFTER_MS } from '@/lib/scan/scanLimits'
+import { cooldownAvailableAt } from '@/lib/cooldown/cooldown'
+import { SCAN_COOLDOWN_MS, SCAN_LOOKBACK_MS, SCAN_STALE_AFTER_MS } from '@/lib/scan/scanLimits'
 
 export { SCAN_COOLDOWN_MS, SCAN_STALE_AFTER_MS }
 
 export const SCAN_ROW_SKIP_CODE = 'ROWS_SKIPPED'
-export const SCAN_COVERAGE_GAP = 'COVERAGE_GAP'
 
 const STORED_WARNINGS = [
   'PERMISSIONS_UNVERIFIED',
@@ -40,9 +42,7 @@ const STORED_WARNINGS = [
 ] as const
 
 function getSyncLookbackDate(): Date {
-  const lookback = new Date()
-  lookback.setUTCFullYear(lookback.getUTCFullYear() - 1)
-  return lookback
+  return new Date(Date.now() - SCAN_LOOKBACK_MS)
 }
 
 function mapProbeErrorForSync(code: string): string {
@@ -59,6 +59,22 @@ function mapProbeErrorForSync(code: string): string {
     return 'INVALID_API_KEY'
   }
   return 'INVALID_API_KEY'
+}
+
+type PreparedSecret = { stored: string; format: SecretFormat }
+
+function prepareSecret(exchange: string, apiSecret: string): Result<PreparedSecret> {
+  if (!isAsymmetricVenue(exchange)) {
+    if (!apiSecret.trim()) return { success: false, error: 'INVALID_SECRET_OR_PASSPHRASE' }
+    return { success: true, data: { stored: apiSecret, format: 'hmac' } }
+  }
+  try {
+    const prepared = prepareVenuePrivateKey(exchange, apiSecret)
+    return { success: true, data: { stored: prepared.stored, format: prepared.algorithm } }
+  } catch (error) {
+    const unsupported = error instanceof Error && error.message === 'UNSUPPORTED_SIGNING_KEY'
+    return { success: false, error: unsupported ? 'PRIVATE_KEY_ALGORITHM_UNSUPPORTED' : 'PRIVATE_KEY_INVALID' }
+  }
 }
 
 function storedWarnings(probe: CredentialProbeResult): string[] {
@@ -95,6 +111,11 @@ export async function connectExchange(
   proxy?: string
 ): Promise<Result<{ account: ExchangeAccount; warnings: string[] }>> {
   void proxy
+  const secret = prepareSecret(exchange, apiSecret)
+  if (!secret.success) {
+    return { success: false, error: secret.error }
+  }
+
   if ((exchange === 'okx' || exchange === 'bitget') && !passphrase) {
     return { success: false, error: 'PASSPHRASE_REQUIRED' }
   }
@@ -113,7 +134,7 @@ export async function connectExchange(
 
   const credentials: ExchangeCredentials = {
     apiKey,
-    apiSecret,
+    apiSecret: secret.data.stored,
     passphrase,
   }
 
@@ -123,7 +144,7 @@ export async function connectExchange(
   }
 
   const encryptedKey = encrypt(apiKey)
-  const encryptedSecret = encrypt(apiSecret)
+  const encryptedSecret = encrypt(secret.data.stored)
   const encryptedPassphrase = passphrase ? encrypt(passphrase) : null
 
   const account = await createExchangeAccount(supabase, userId, exchange, label ?? null)
@@ -144,7 +165,8 @@ export async function connectExchange(
       encryptedPassphrase?.encrypted ?? null,
       encryptedPassphrase?.iv ?? null,
       null,
-      null
+      null,
+      secret.data.format
     )
     if (!keyCreated) {
       await removeOrphanAccount(supabase, account.id, userId)
@@ -168,8 +190,28 @@ export async function listExchangeAccounts(
   supabase: SupabaseClient,
   userId: string
 ): Promise<Result<ExchangeAccountWithStats[]>> {
-  const accounts = await getExchangeAccounts(supabase, userId)
-  return { success: true, data: accounts }
+  const listedAt = new Date()
+  const accounts = (await getExchangeAccounts(supabase, userId)).map((account) => ({
+    ...account,
+    syncAvailableAt: cooldownAvailableAt(account.last_synced, SCAN_COOLDOWN_MS, listedAt),
+  }))
+  if (accounts.length === 0) return { success: true, data: accounts }
+
+  const serviceSupabase = (await import('@/lib/db/supabase-server')).createSupabaseServiceClient()
+  const metadata = await getApiKeyMetadata(serviceSupabase, accounts.map((account) => account.id))
+
+  return {
+    success: true,
+    data: accounts.map((account) => {
+      const keyMetadata = metadata.get(account.id)
+      if (!keyMetadata) return account
+      return {
+        ...account,
+        has_passphrase: account.has_passphrase || keyMetadata.has_passphrase,
+        secret_format: keyMetadata.secret_format,
+      }
+    }),
+  }
 }
 
 export async function syncExchangeAccount(
@@ -248,7 +290,8 @@ export async function removeExchangeAccount(
     return { success: false, error: 'NOT_FOUND' }
   }
 
-  const trackingDeleted = await deleteExchangeTrackingData(supabase, userId, accountId)
+  const serviceSupabase = (await import('@/lib/db/supabase-server')).createSupabaseServiceClient()
+  const trackingDeleted = await deleteExchangeTrackingData(supabase, serviceSupabase, userId, accountId)
   if (!trackingDeleted) {
     return { success: false, error: 'INTERNAL_ERROR' }
   }
@@ -278,7 +321,8 @@ export async function toggleExchangeActive(
   }
 
   if (!isActive) {
-    const deleted = await deleteExchangeTrackingData(supabase, userId, accountId)
+    const serviceSupabase = (await import('@/lib/db/supabase-server')).createSupabaseServiceClient()
+    const deleted = await deleteExchangeTrackingData(supabase, serviceSupabase, userId, accountId)
     if (!deleted) {
       await updateExchangeActive(supabase, accountId, userId, true)
       return { success: false, error: 'INTERNAL_ERROR' }
@@ -318,6 +362,11 @@ export async function updateExchangeApiKeys(
     return { success: false, error: 'NOT_FOUND' }
   }
 
+  const secret = prepareSecret(account.exchange, apiSecret)
+  if (!secret.success) {
+    return { success: false, error: secret.error }
+  }
+
   if ((account.exchange === 'okx' || account.exchange === 'bitget') && !passphrase) {
     return { success: false, error: 'PASSPHRASE_REQUIRED' }
   }
@@ -331,7 +380,7 @@ export async function updateExchangeApiKeys(
 
   const credentials: ExchangeCredentials = {
     apiKey,
-    apiSecret,
+    apiSecret: secret.data.stored,
     passphrase,
   }
 
@@ -341,7 +390,7 @@ export async function updateExchangeApiKeys(
   }
 
   const encryptedKey = encrypt(apiKey)
-  const encryptedSecret = encrypt(apiSecret)
+  const encryptedSecret = encrypt(secret.data.stored)
   const encryptedPassphrase = passphrase ? encrypt(passphrase) : null
 
   const serviceSupabase = (await import('@/lib/db/supabase-server')).createSupabaseServiceClient()
@@ -354,7 +403,8 @@ export async function updateExchangeApiKeys(
     encryptedKey.iv,
     encryptedSecret.iv,
     encryptedPassphrase?.encrypted ?? null,
-    encryptedPassphrase?.iv ?? null
+    encryptedPassphrase?.iv ?? null,
+    secret.data.format
   )
   if (!keyUpdated) {
     return { success: false, error: 'INTERNAL_ERROR' }

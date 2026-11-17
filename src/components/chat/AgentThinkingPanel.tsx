@@ -10,6 +10,8 @@ import {
   Wrench,
   type LucideIcon,
 } from 'lucide-react'
+import { useT } from '@/lib/i18n/client'
+import { fillTemplate } from '@/lib/i18n/format'
 
 export type AgentThinkingLink = {
   title: string
@@ -61,11 +63,12 @@ export function AgentThinkingPanel({
   isCollapsed,
   onToggleCollapsed,
 }: AgentThinkingPanelProps): React.JSX.Element {
+  const { t } = useT()
   const seconds = Math.max(1, elapsedTime)
   const isCompleted = !isThinking && steps.length > 0
   const title = isCompleted
-    ? `Quá trình phân tích hoàn thành (${seconds}s)`
-    : `Quá trình phân tích (${seconds}s)`
+    ? fillTemplate(t.ai.analysisDone, { seconds })
+    : fillTemplate(t.ai.analysis, { seconds })
 
   if (!isThinking && isCollapsed) {
     return (
@@ -86,7 +89,7 @@ export function AgentThinkingPanel({
           {
             id: 'pending',
             type: 'thinking_start',
-            message: 'Đang suy nghĩ...',
+            message: t.ai.thinking,
           },
         ]
       : steps
@@ -165,7 +168,7 @@ export function AgentThinkingPanel({
           )
         })}
         {!isThinking && visibleSteps.length === 0 ? (
-          <p className="text-xs text-slate-400">Đã hoàn tất phân tích.</p>
+          <p className="text-xs text-slate-400">{t.ai.analysisFinished}</p>
         ) : null}
       </div>
     </div>

@@ -1,5 +1,8 @@
 import { createServerClient, type CookieOptions } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
+import { REMEMBER_COOKIE_NAME, SUPABASE_COOKIE_PREFIX } from '@/lib/auth/constants'
+import { classifyAuthFailure, describeAuthFailure, isDeadSession, type AuthFailureShape } from '@/lib/auth/authFailure'
+import { applyRememberPolicy, isRememberDisabled } from '@/lib/auth/rememberPolicy'
 import { decideMiddlewareAccess } from '@/lib/security/middlewareAccess'
 import {
   isExchangeDebugPath,
@@ -12,6 +15,12 @@ type MiddlewareAuthResponse = {
   data: {
     user: MiddlewareAuthUser | null
   }
+  error?: AuthFailureShape | null
+}
+
+type MiddlewareAuthResult = {
+  user: MiddlewareAuthUser | null
+  signedOutByError: boolean
 }
 
 const PROTECTED_ROUTES = [
@@ -19,26 +28,31 @@ const PROTECTED_ROUTES = [
   '/demo-trading',
   '/ai-assistant',
   '/exchange',
-  '/profile',
+  '/settings',
   '/api/exchange',
   '/api/pnl',
   '/api/demo',
   '/api/ai',
-  '/api/profile',
+  '/api/settings',
 ]
 
-const AUTH_ROUTES = ['/login', '/register']
+const AUTH_ROUTES = ['/login', '/register', '/forgot-password']
 
 async function getUserWithRetry(
   fetchUser: () => Promise<MiddlewareAuthResponse>,
   retries: number
-): Promise<MiddlewareAuthUser | null> {
+): Promise<MiddlewareAuthResult> {
   let lastError: unknown = null
 
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     try {
       const result = await fetchUser()
-      return result.data.user
+      if (result.data.user) return { user: result.data.user, signedOutByError: false }
+      if (result.error && classifyAuthFailure(result.error) === 'unavailable') {
+        lastError = result.error
+        continue
+      }
+      return { user: null, signedOutByError: isDeadSession(result.error) }
     } catch (error) {
       lastError = error
     }
@@ -76,6 +90,7 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
 
   let user: { id: string } | null = null
   let authUnavailable = false
+  let clearAuthCookies = false
 
   try {
     const supabase = createServerClient(
@@ -91,18 +106,30 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
               request.cookies.set(name, value)
             )
             response = NextResponse.next({ request })
+            const disabled = isRememberDisabled(request.cookies.get(REMEMBER_COOKIE_NAME)?.value)
             cookiesToSet.forEach(({ name, value, options }) =>
-              response.cookies.set(name, value, options)
+              response.cookies.set(name, value, applyRememberPolicy(name, options, disabled))
             )
           },
         },
       }
     )
 
-    user = await getUserWithRetry(() => supabase.auth.getUser(), 1)
-  } catch {
+    const result = await getUserWithRetry(() => supabase.auth.getUser(), 1)
+    user = result.user
+    clearAuthCookies = result.signedOutByError
+  } catch (error) {
     authUnavailable = true
-    console.error('[middleware] auth check failed')
+    console.error(`[middleware] auth check failed: ${describeAuthFailure(error)}`)
+  }
+
+  const clearStaleSession = (target: NextResponse): NextResponse => {
+    if (!clearAuthCookies) return target
+    request.cookies
+      .getAll()
+      .filter(({ name }) => name.startsWith(SUPABASE_COOKIE_PREFIX))
+      .forEach(({ name }) => target.cookies.set(name, '', { path: '/', maxAge: 0 }))
+    return target
   }
 
   const decision = decideMiddlewareAccess({
@@ -121,16 +148,15 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   }
 
   if (decision === 'unauthorized') {
-    return NextResponse.json(
-      { success: false, data: null, error: 'UNAUTHORIZED' },
-      { status: 401 }
+    return clearStaleSession(
+      NextResponse.json({ success: false, data: null, error: 'UNAUTHORIZED' }, { status: 401 })
     )
   }
 
   if (decision === 'redirect_login') {
     const loginUrl = new URL('/login', request.url)
     loginUrl.searchParams.set('next', pathname)
-    return NextResponse.redirect(loginUrl)
+    return clearStaleSession(NextResponse.redirect(loginUrl))
   }
 
   if (decision === 'redirect_dashboard') {

@@ -1,4 +1,4 @@
-# Track PNL Pro Documentation
+# PnLens Documentation
 
 The platform enabling crypto traders to track PNL across multiple centralized exchanges, simulate risk-free trading, and receive strategic advice via an integrated AI assistant.
 
@@ -18,7 +18,7 @@ The platform enabling crypto traders to track PNL across multiple centralized ex
 
 ## Overview
 
-Track PNL Pro addresses the challenge of fragmented trading data by aggregating PNL from multiple Centralized Exchanges (CEXs) into a single interface. The platform also provides a risk-free demo trading environment and an AI assistant powered by advanced LLMs.
+PnLens addresses the challenge of fragmented trading data by aggregating PNL from multiple Centralized Exchanges (CEXs) into a single interface. The platform also provides a risk-free demo trading environment and an AI assistant powered by advanced LLMs.
 
 **Target Audience:** Multi-exchange crypto traders (Binance, OKX, Bybit, Bitget, Gate.io) seeking automated PNL tracking, strategy simulation, and AI-driven market insights.
 
@@ -111,3 +111,4 @@ Track PNL Pro addresses the challenge of fragmented trading data by aggregating 
 
 - Architecture: [View](docs/ARCHITECTURE.md)
 - Exchange Integration Research: [View](docs/deep-research-report.md) (Technical guide on utilizing REST APIs from various crypto exchanges)
+- Local test account: email `pnlens-test@example.com`. Password is `PNLENS_TEST_PASSWORD` in gitignored `src/.env.test-account`. Sign in at `http://localhost:3000/login`. How the account was created, which tables were seeded, and which exchange accounts are connected: `spec/index.md`. Do not commit that password file or `src/.env.local`.

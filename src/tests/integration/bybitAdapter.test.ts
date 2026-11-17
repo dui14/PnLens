@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { BybitAdapter } from '@/lib/adapters/bybitAdapter'
-import { credentials, installFastSleep, jsonResponse, recentSince, requestUrl } from './support/http'
+import { credentials as hmacCredentials, installFastSleep, jsonResponse, recentSince, requestUrl, testPrivateKeyPem } from './support/http'
+
+const credentials = { ...hmacCredentials, apiSecret: testPrivateKeyPem }
 
 const http = vi.hoisted(() => {
   return {

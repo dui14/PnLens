@@ -1,3 +1,4 @@
+import { HistoryGapTracker, type HistoryGap } from './historyGaps'
 import { createHash, createHmac } from 'crypto'
 import type {
   ExchangeAdapterTrade,
@@ -14,18 +15,22 @@ import {
 } from './credentialValidation'
 
 import { GATEIO_BASE_URL as BASE_URL } from './exchangeBases'
+import { SCAN_LOOKBACK_MS } from '@/lib/scan/scanLimits'
 import { fetchExchange } from './httpClient'
 import { throwOnServerPage } from './exchangeWindowError'
 import {
   TradeRejectCounter,
+  VENUE_DECIMAL,
+  absDecimal,
   decimalOrZero,
+  multiplyDecimals,
   flexibleTimeToIso,
   optionalDecimal,
   requiredDecimal,
   type TradeRejectCounts,
 } from './tradeFields'
 const REQUEST_TIMEOUT = 10_000
-const DEFAULT_LOOKBACK_MS = 365 * 24 * 60 * 60 * 1000
+const DEFAULT_LOOKBACK_MS = SCAN_LOOKBACK_MS
 const GATE_MAX_WINDOW_SECONDS = 30 * 24 * 60 * 60
 
 type GateHttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
@@ -57,6 +62,12 @@ function normalizeSymbol(raw: string | undefined): string {
   return raw.replace(/[^A-Z0-9]/gi, '').toUpperCase()
 }
 
+function textValue(value: unknown): string | undefined {
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  return undefined
+}
+
 function toIsoFromGateTimestamp(value: unknown): string | null {
   return flexibleTimeToIso(value)
 }
@@ -75,8 +86,14 @@ async function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-async function fetchWithRetry(url: string, options?: RequestInit, attempt = 0): Promise<Response> {
-  const response = await fetchWithTimeout(url, options)
+type RequestSource = RequestInit | (() => RequestInit)
+
+function resolveRequest(source?: RequestSource): RequestInit | undefined {
+  return typeof source === 'function' ? source() : source
+}
+
+async function fetchWithRetry(url: string, options?: RequestSource, attempt = 0): Promise<Response> {
+  const response = await fetchWithTimeout(url, resolveRequest(options))
   if (response.status === 429 && attempt < 4) {
     const backoff = Math.min(Math.pow(2, attempt) * 1000, 60_000)
     await sleep(backoff + Math.random() * 500)
@@ -85,9 +102,25 @@ async function fetchWithRetry(url: string, options?: RequestInit, attempt = 0): 
   return response
 }
 
+function parseContractSpec(row: GateFuturesContract): GateFuturesContractSpec | null {
+  const raw = row.quanto_multiplier ?? row.multiplier
+  const multiplierRaw = asNumber(raw)
+  const multiplier = Number.isFinite(multiplierRaw) ? Math.abs(multiplierRaw) : 0
+  if (multiplier <= 0) return null
+  const multiplierText = VENUE_DECIMAL.test(String(raw ?? '')) ? absDecimal(String(raw)) : undefined
+  return { multiplier, multiplierText }
+}
+
 export class GateioAdapter implements ExchangeAdapter {
   private futuresContractSpecsBySettle = new Map<string, Map<string, GateFuturesContractSpec>>()
+  private tradeContractSpecsBySettle = new Map<string, Map<string, GateFuturesContractSpec>>()
   private readonly rejections = new TradeRejectCounter()
+  private readonly gaps = new HistoryGapTracker()
+
+  historyGaps(): HistoryGap[] {
+    return this.gaps.gaps
+  }
+
 
   rejectedTradeCounts(): TradeRejectCounts {
     return this.rejections.counts
@@ -122,11 +155,8 @@ export class GateioAdapter implements ExchangeAdapter {
   async validateCredentials(credentials: ExchangeCredentials): Promise<CredentialProbeResult> {
     try {
       const requestPath = '/account/detail'
-      const headers = this.buildHeaders(credentials, 'GET', requestPath)
-      const response = await fetchWithRetry(`${BASE_URL}${requestPath}`, {
-        method: 'GET',
-        headers,
-      })
+      const request = () => ({ method: 'GET', headers: this.buildHeaders(credentials, 'GET', requestPath) })
+      const response = await fetchWithRetry(`${BASE_URL}${requestPath}`, request)
       return interpretGateAccountDetail(response.status, await readJson(response))
     } catch {
       return probeFailure('EXCHANGE_UNREACHABLE')
@@ -143,6 +173,7 @@ export class GateioAdapter implements ExchangeAdapter {
   async fetchTrades(credentials: ExchangeCredentials, since?: Date, until?: Date): Promise<ExchangeAdapterTrade[]> {
     this.scanEndMs = until?.getTime() ?? Date.now()
     this.rejections.reset()
+    this.gaps.reset()
     const startMs = since ? since.getTime() : Date.now() - DEFAULT_LOOKBACK_MS
 
     const [spotTrades, futuresTrades, positionCloseEvents] = await Promise.all([
@@ -161,11 +192,8 @@ export class GateioAdapter implements ExchangeAdapter {
     for (const settle of settles) {
       const futuresContractSpecs = await this.getFuturesContractSpecs(settle)
       const requestPath = `/futures/${settle}/positions`
-      const headers = this.buildHeaders(credentials, 'GET', requestPath)
-      const response = await fetchWithRetry(`${BASE_URL}${requestPath}`, {
-        method: 'GET',
-        headers,
-      })
+      const request = () => ({ method: 'GET', headers: this.buildHeaders(credentials, 'GET', requestPath) })
+      const response = await fetchWithRetry(`${BASE_URL}${requestPath}`, request)
 
       if (!response.ok) continue
       const data = (await response.json()) as unknown
@@ -203,11 +231,8 @@ export class GateioAdapter implements ExchangeAdapter {
 
   async fetchBalances(credentials: ExchangeCredentials): Promise<AssetBalance[]> {
     const requestPath = '/spot/accounts'
-    const headers = this.buildHeaders(credentials, 'GET', requestPath)
-    const response = await fetchWithRetry(`${BASE_URL}${requestPath}`, {
-      method: 'GET',
-      headers,
-    })
+    const request = () => ({ method: 'GET', headers: this.buildHeaders(credentials, 'GET', requestPath) })
+    const response = await fetchWithRetry(`${BASE_URL}${requestPath}`, request)
 
     if (!response.ok) return []
     const data = (await response.json()) as unknown
@@ -257,16 +282,13 @@ export class GateioAdapter implements ExchangeAdapter {
         })
         const queryString = query.toString()
         const requestPath = '/spot/my_trades'
-        const headers = this.buildHeaders(credentials, 'GET', requestPath, queryString)
-        const response = await fetchWithRetry(`${BASE_URL}${requestPath}?${queryString}`, {
-          method: 'GET',
-          headers,
-        })
+        const request = () => ({ method: 'GET', headers: this.buildHeaders(credentials, 'GET', requestPath, queryString) })
+        const response = await fetchWithRetry(`${BASE_URL}${requestPath}?${queryString}`, request)
 
         throwOnServerPage(response)
-          if (!response.ok) break
+          if (!response.ok) { this.gaps.record('spot', windowStartSec * 1000, windowEndSec * 1000); break }
         const data = (await response.json()) as unknown
-        if (!Array.isArray(data)) break
+        if (!Array.isArray(data)) { this.gaps.record('spot', windowStartSec * 1000, windowEndSec * 1000); break }
         const pageTrades = data as GateSpotTrade[]
         if (pageTrades.length === 0) break
 
@@ -306,22 +328,25 @@ export class GateioAdapter implements ExchangeAdapter {
           })
           const queryString = query.toString()
           const requestPath = `/futures/${settle}/my_trades_timerange`
-          const headers = this.buildHeaders(credentials, 'GET', requestPath, queryString)
-          const response = await fetchWithRetry(`${BASE_URL}${requestPath}?${queryString}`, {
-            method: 'GET',
-            headers,
-          })
+          const request = () => ({ method: 'GET', headers: this.buildHeaders(credentials, 'GET', requestPath, queryString) })
+          const response = await fetchWithRetry(`${BASE_URL}${requestPath}?${queryString}`, request)
 
           throwOnServerPage(response)
-          if (!response.ok) break
+          if (!response.ok) { this.gaps.record(`futures_${settle}`, windowStartSec * 1000, windowEndSec * 1000); break }
           const data = (await response.json()) as unknown
-          if (!Array.isArray(data)) break
+          if (!Array.isArray(data)) { this.gaps.record(`futures_${settle}`, windowStartSec * 1000, windowEndSec * 1000); break }
           const pageTrades = data as GateFuturesTrade[]
           if (pageTrades.length === 0) break
 
+          const contractSpecs = await this.loadTradeContractSpecs(settle, pageTrades)
+          const resolvable = pageTrades.filter((trade) => contractSpecs.get(String(trade.contract ?? '').toUpperCase())?.multiplierText)
+          if (resolvable.length < pageTrades.length) {
+            this.gaps.record(`futures_${settle}`, windowStartSec * 1000, windowEndSec * 1000)
+          }
+
           allTrades.push(
-            ...pageTrades.flatMap((trade) =>
-              this.accepted(this.normalizeFuturesTrade(trade, settle))
+            ...resolvable.flatMap((trade) =>
+              this.accepted(this.normalizeFuturesTrade(trade, settle, contractSpecs))
             )
           )
 
@@ -360,16 +385,13 @@ export class GateioAdapter implements ExchangeAdapter {
           })
           const queryString = query.toString()
           const requestPath = `/futures/${settle}/position_close`
-          const headers = this.buildHeaders(credentials, 'GET', requestPath, queryString)
-          const response = await fetchWithRetry(`${BASE_URL}${requestPath}?${queryString}`, {
-            method: 'GET',
-            headers,
-          })
+          const request = () => ({ method: 'GET', headers: this.buildHeaders(credentials, 'GET', requestPath, queryString) })
+          const response = await fetchWithRetry(`${BASE_URL}${requestPath}?${queryString}`, request)
 
           throwOnServerPage(response)
-          if (!response.ok) break
+          if (!response.ok) { this.gaps.record(`position_close_${settle}`, windowStartSec * 1000, windowEndSec * 1000); break }
           const data = (await response.json()) as unknown
-          if (!Array.isArray(data)) break
+          if (!Array.isArray(data)) { this.gaps.record(`position_close_${settle}`, windowStartSec * 1000, windowEndSec * 1000); break }
           const pageEvents = data as GatePositionClose[]
           if (pageEvents.length === 0) break
 
@@ -402,9 +424,11 @@ export class GateioAdapter implements ExchangeAdapter {
     orderId: unknown,
     timeValue: unknown
   ): string | null {
-    if (typeof explicitId === 'string' && explicitId.trim()) return explicitId.trim()
-    if (typeof orderId === 'string' && orderId.trim() && (typeof timeValue === 'string' || typeof timeValue === 'number')) {
-      return `${prefix}_${orderId.trim()}_${timeValue}`
+    const explicit = textValue(explicitId)?.trim()
+    if (explicit) return explicit
+    const order = textValue(orderId)?.trim()
+    if (order && (typeof timeValue === 'string' || typeof timeValue === 'number')) {
+      return `${prefix}_${order}_${timeValue}`
     }
     return null
   }
@@ -446,29 +470,34 @@ export class GateioAdapter implements ExchangeAdapter {
     }
   }
 
-  private normalizeFuturesTrade(trade: GateFuturesTrade, settle: string): ExchangeAdapterTrade | null {
+  private normalizeFuturesTrade(
+    trade: GateFuturesTrade,
+    settle: string,
+    contractSpecs: Map<string, GateFuturesContractSpec>
+  ): ExchangeAdapterTrade | null {
     const tradedAt = toIsoFromGateTimestamp(trade.create_time_ms ?? trade.create_time)
     if (!tradedAt) return this.rejections.reject('INVALID_TIMESTAMP')
     const externalTradeId = this.stableTradeId(
-      trade.id,
+      trade.trade_id ?? trade.id,
       'futures',
       trade.order_id,
       trade.create_time_ms ?? trade.create_time
     )
     if (!externalTradeId) return this.rejections.reject('MISSING_ID')
-    const quantity = requiredDecimal(
-      typeof trade.size === 'string' ? trade.size : typeof trade.qty === 'string' ? trade.qty : null,
-      this.rejections
-    )
-    if (!quantity) return null
+    const contracts = requiredDecimal(textValue(trade.size) ?? textValue(trade.qty) ?? null, this.rejections)
+    if (!contracts) return null
+    const multiplier = contractSpecs.get(String(trade.contract ?? '').toUpperCase())?.multiplierText
+    const scaled = multiplier ? multiplyDecimals(contracts, multiplier) : contracts
+    if (!scaled) return this.rejections.reject('INVALID_NUMBER')
+    const quantity = absDecimal(scaled)
     const price = requiredDecimal(typeof trade.price === 'string' ? trade.price : null, this.rejections)
     if (!price) return null
-    const fee = decimalOrZero(typeof trade.fee === 'string' ? trade.fee : undefined, this.rejections)
+    const fee = decimalOrZero(textValue(trade.fee), this.rejections)
     if (!fee) return null
-    const realizedPnl = optionalDecimal(typeof trade.pnl === 'string' ? trade.pnl : trade.pnl === undefined || trade.pnl === null ? null : undefined, this.rejections)
+    const realizedPnl = optionalDecimal(textValue(trade.pnl), this.rejections)
     if (realizedPnl === undefined) return null
     const sideField = typeof trade.side === 'string' ? trade.side.toLowerCase() : ''
-    const sideFromSize: 'buy' | 'sell' = quantity.startsWith('-') && !/^-0(\.0+)?$/.test(quantity) ? 'sell' : 'buy'
+    const sideFromSize: 'buy' | 'sell' = contracts.startsWith('-') && !/^-0(\.0+)?$/.test(contracts) ? 'sell' : 'buy'
     const side: 'buy' | 'sell' = sideField === 'sell' ? 'sell' : sideField === 'buy' ? 'buy' : sideFromSize
     return {
       external_trade_id: externalTradeId,
@@ -517,18 +546,38 @@ export class GateioAdapter implements ExchangeAdapter {
       if (!item || typeof item !== 'object') continue
       const row = item as GateFuturesContract
       const contractName = String(row.name ?? '').toUpperCase()
-      if (!contractName) continue
-
-      const multiplierRaw = asNumber(row.quanto_multiplier ?? row.multiplier)
-      const multiplier = Number.isFinite(multiplierRaw) ? Math.abs(multiplierRaw) : 0
-      if (multiplier <= 0) continue
-
-      specs.set(contractName, {
-        multiplier,
-      })
+      const spec = parseContractSpec(row)
+      if (contractName && spec) specs.set(contractName, spec)
     }
 
     this.futuresContractSpecsBySettle.set(settleKey, specs)
+    return specs
+  }
+
+  private async loadTradeContractSpecs(
+    settle: string,
+    trades: GateFuturesTrade[]
+  ): Promise<Map<string, GateFuturesContractSpec>> {
+    const specs = this.tradeContractSpecsBySettle.get(settle) ?? new Map<string, GateFuturesContractSpec>()
+    this.tradeContractSpecsBySettle.set(settle, specs)
+    const names = new Set(trades.map((trade) => String(trade.contract ?? '').toUpperCase()).filter(Boolean))
+
+    for (const name of names) {
+      if (specs.has(name)) continue
+      try {
+        const response = await fetchWithRetry(`${BASE_URL}/futures/${settle}/contracts/${name}`, { method: 'GET' })
+        if (!response.ok) continue
+        const data = (await response.json()) as unknown
+        const row = (Array.isArray(data) ? data.find((item) => String(item?.name ?? '').toUpperCase() === name) : data) as
+          | GateFuturesContract
+          | undefined
+        const spec = row && typeof row === 'object' ? parseContractSpec(row) : null
+        if (spec) specs.set(name, spec)
+      } catch {
+        continue
+      }
+    }
+
     return specs
   }
 
@@ -557,32 +606,35 @@ export class GateioAdapter implements ExchangeAdapter {
 
   private normalizePositionCloseEvent(trade: GatePositionClose): ExchangeAdapterTrade | null {
     const pnlSource = trade.pnl ?? trade.close_pnl ?? trade.realized_pnl
-    const pnl = optionalDecimal(typeof pnlSource === 'string' ? pnlSource : null, this.rejections)
+    const pnl = optionalDecimal(textValue(pnlSource), this.rejections)
     if (pnl === undefined || pnl === null) return null
 
     const symbol = normalizeSymbol(trade.contract)
     if (!symbol) return null
 
     const sideField = typeof trade.side === 'string' ? trade.side.toLowerCase() : ''
-    const sizeText = typeof trade.size === 'string' ? trade.size : ''
+    const sizeText = textValue(trade.size) ?? ''
     const sideFromSize: 'buy' | 'sell' = sizeText.startsWith('-') && !/^-0(\.0+)?$/.test(sizeText) ? 'sell' : 'buy'
-    const side: 'buy' | 'sell' = sideField === 'sell' ? 'sell' : sideField === 'buy' ? 'buy' : sideFromSize
+    const side: 'buy' | 'sell' =
+      sideField === 'sell' || sideField === 'long'
+        ? 'sell'
+        : sideField === 'buy' || sideField === 'short'
+          ? 'buy'
+          : sideFromSize
 
     const eventTs = trade.close_time_ms ?? trade.time_ms ?? trade.close_time ?? trade.time
     const tradedAt = toIsoFromGateTimestamp(eventTs)
     if (!tradedAt) return this.rejections.reject('INVALID_TIMESTAMP')
+    const explicitId = textValue(trade.id)?.trim()
+    const orderId = textValue(trade.order_id)?.trim()
     const externalTradeId =
-      (typeof trade.id === 'string' && trade.id.trim()) ||
-      (typeof trade.order_id === 'string' && trade.order_id.trim()
-        ? `position_close_${trade.order_id.trim()}_${String(eventTs)}`
-        : '')
-    if (!externalTradeId) return this.rejections.reject('MISSING_ID')
-    const fee = decimalOrZero(typeof trade.fee === 'string' ? trade.fee : undefined, this.rejections)
+      explicitId ||
+      (orderId
+        ? `position_close_${orderId}_${String(eventTs)}`
+        : `position_close_${symbol}_${sideField}_${String(eventTs)}`)
+    const fee = decimalOrZero(textValue(trade.fee ?? trade.pnl_fee), this.rejections)
     if (!fee) return null
-    const fundingFee = decimalOrZero(
-      typeof trade.funding_fee === 'string' ? trade.funding_fee : undefined,
-      this.rejections
-    )
+    const fundingFee = decimalOrZero(textValue(trade.funding_fee ?? trade.pnl_fund), this.rejections)
     if (!fundingFee) return null
 
     return {
@@ -649,37 +701,40 @@ type GateSpotTrade = {
 }
 
 type GateFuturesTrade = {
-  id?: string
-  order_id?: string
+  id?: string | number
+  trade_id?: string | number
+  order_id?: string | number
   contract?: string
   side?: string
-  size?: string
-  qty?: string
+  size?: string | number
+  qty?: string | number
   price?: string
-  fee?: string
+  fee?: string | number
   fee_currency?: string
   settle?: string
-  pnl?: string
-  create_time?: string
+  pnl?: string | number
+  create_time?: string | number
   create_time_ms?: string
 }
 
 type GatePositionClose = {
   id?: string
-  order_id?: string
+  order_id?: string | number
   contract?: string
   side?: string
-  size?: string
-  fee?: string
+  size?: string | number
+  fee?: string | number
   fee_currency?: string
   settle?: string
-  pnl?: string
-  close_pnl?: string
-  realized_pnl?: string
-  funding_fee?: string
-  close_time?: string
+  pnl?: string | number
+  close_pnl?: string | number
+  realized_pnl?: string | number
+  funding_fee?: string | number
+  pnl_fee?: string | number
+  pnl_fund?: string | number
+  close_time?: string | number
   close_time_ms?: string
-  time?: string
+  time?: string | number
   time_ms?: string
 }
 
@@ -703,4 +758,5 @@ type GateFuturesContract = {
 
 type GateFuturesContractSpec = {
   multiplier: number
+  multiplierText?: string
 }

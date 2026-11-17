@@ -158,7 +158,7 @@ describe('GateioAdapter', () => {
     expect(futures).toMatchObject({
       symbol: 'BTCUSDT',
       side: 'sell',
-      quantity: '-3',
+      quantity: '0.0003',
       realized_pnl: '8.5',
       trade_type: 'futures',
     })
@@ -227,5 +227,123 @@ describe('GateioAdapter', () => {
     expect(pages).toBeGreaterThanOrEqual(2)
     expect(seen.some((url) => url.includes('page=2'))).toBe(true)
     expect(trades.filter((trade) => trade.external_trade_id === 'spot-0')).toHaveLength(1)
+  })
+
+  it('converts futures contracts to base units so volume is not inflated', async () => {
+    handler = (url) => {
+      if (url.includes('/futures/usdt/my_trades_timerange')) {
+        return jsonResponse([
+          { trade_id: '843', contract: 'BTC_USDT', size: 66, price: '84500', fee: '0.27885', create_time_ms: '1710000000000' },
+        ])
+      }
+      return defaultRoute(url)
+    }
+
+    const [trade] = await new GateioAdapter().fetchTrades(credentials, recentSince())
+    expect(trade.quantity).toBe('0.0066')
+    expect(Number(trade.quantity) * Number(trade.price)).toBeCloseTo(557.7, 6)
+  })
+
+  it('skips a futures fill whose contract spec cannot be read instead of storing raw contracts', async () => {
+    handler = (url) => {
+      if (url.includes('/futures/usdt/my_trades_timerange')) {
+        return jsonResponse([
+          { trade_id: '844', contract: 'ETH_USDT', size: 5, price: '3000', fee: '0.1', create_time_ms: '1710000000000' },
+        ])
+      }
+      if (url.includes('/futures/usdt/contracts/ETH_USDT')) return jsonResponse({ label: 'ERR' }, 404)
+      return defaultRoute(url)
+    }
+
+    const trades = await new GateioAdapter().fetchTrades(credentials, recentSince())
+    expect(trades.filter((trade) => trade.trade_type === 'futures')).toEqual([])
+  })
+
+  it('reads a single contract spec object without downloading the full contract list', async () => {
+    const requested: string[] = []
+    handler = (url) => {
+      requested.push(url)
+      if (url.includes('/futures/usdt/my_trades_timerange')) {
+        return jsonResponse([
+          { trade_id: '845', contract: 'ETH_USDT', size: 10, price: '3000', fee: '0.1', create_time_ms: '1710000000000' },
+        ])
+      }
+      if (url.endsWith('/futures/usdt/contracts/ETH_USDT')) {
+        return jsonResponse({ name: 'ETH_USDT', quanto_multiplier: '0.01' })
+      }
+      return defaultRoute(url)
+    }
+
+    const trades = await new GateioAdapter().fetchTrades(credentials, recentSince())
+    expect(trades.find((trade) => trade.external_trade_id === '845')?.quantity).toBe('0.10')
+    expect(requested.some((url) => url.endsWith('/futures/usdt/contracts'))).toBe(false)
+  })
+
+  it('accepts numeric size and time on futures fills and uses trade_id', async () => {
+    handler = (url) => {
+      if (url.includes('/futures/usdt/my_trades_timerange')) {
+        return jsonResponse([
+          {
+            trade_id: '991',
+            order_id: '5001',
+            contract: 'BTC_USDT',
+            size: -3,
+            price: '65000',
+            fee: '0.02',
+            create_time: 1710000000.5,
+          },
+        ])
+      }
+      return defaultRoute(url)
+    }
+
+    const trades = await new GateioAdapter().fetchTrades(credentials, recentSince())
+    expect(trades).toEqual([
+      expect.objectContaining({
+        external_trade_id: '991',
+        symbol: 'BTCUSDT',
+        side: 'sell',
+        quantity: '0.0003',
+        fee: '0.02',
+        realized_pnl: null,
+        trade_type: 'futures',
+        traded_at: new Date(1710000000500).toISOString(),
+      }),
+    ])
+  })
+
+  it('stores a position_close record with pnl, fee, funding and a derived id', async () => {
+    handler = (url) => {
+      if (url.includes('/futures/usdt/position_close')) {
+        return jsonResponse([
+          {
+            time: 1710000100,
+            contract: 'BTC_USDT',
+            side: 'long',
+            pnl: '12.5',
+            pnl_pnl: '13',
+            pnl_fund: '-0.1',
+            pnl_fee: '-0.4',
+            text: 'web',
+          },
+        ])
+      }
+      return defaultRoute(url)
+    }
+
+    const trades = await new GateioAdapter().fetchTrades(credentials, recentSince())
+    expect(trades).toEqual([
+      expect.objectContaining({
+        external_trade_id: 'position_close_BTCUSDT_long_1710000100',
+        symbol: 'BTCUSDT',
+        side: 'sell',
+        realized_pnl: '12.5',
+        fee: '-0.4',
+        funding_fee: '-0.1',
+        income_type: 'position_close',
+        trade_type: 'futures',
+        traded_at: new Date(1710000100000).toISOString(),
+      }),
+    ])
   })
 })

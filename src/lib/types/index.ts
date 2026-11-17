@@ -25,6 +25,9 @@ export type ChartRange = (typeof CHART_RANGES)[number]
 export const TRADE_SEGMENTS = ['all', 'spot', 'futures'] as const
 export type TradeSegment = (typeof TRADE_SEGMENTS)[number]
 
+export const SNAPSHOT_EXCHANGES = ['all', ...EXCHANGES] as const
+export type SnapshotExchange = (typeof SNAPSHOT_EXCHANGES)[number]
+
 export type UserProfile = {
   id: string
   email: string
@@ -51,9 +54,14 @@ export type ExchangeAccount = {
   created_at: string
 }
 
+export const SECRET_FORMATS = ['hmac', 'rsa', 'ed25519'] as const
+export type SecretFormat = (typeof SECRET_FORMATS)[number]
+
 export type ExchangeAccountWithStats = ExchangeAccount & {
   trade_count: number
   has_passphrase: boolean
+  secret_format: SecretFormat | null
+  syncAvailableAt?: string | null
 }
 
 export type ExchangeCredentials = {
@@ -98,22 +106,9 @@ export type Trade = {
   created_at: string
 }
 
-export type PNLSnapshot = {
-  id: string
-  user_id: string
-  exchange_account_id: string | null
-  period_type: PeriodType
-  period_start: string
-  period_end: string
-  total_pnl: number
-  win_count: number
-  loss_count: number
-  trade_count: number
-  win_rate: number | null
-  best_trade_pnl: number | null
-  worst_trade_pnl: number | null
-  calculated_at: string
-}
+export type DemoTradeStatus = 'pending' | 'open' | 'closed' | 'cancelled'
+
+export type DemoCloseReason = 'manual' | 'take_profit' | 'stop_loss' | 'liquidation' | 'refill'
 
 export type DemoTrade = {
   id: string
@@ -132,10 +127,20 @@ export type DemoTrade = {
   market_price_at_open: number | null
   exit_price: number | null
   realized_pnl: number | null
-  status: 'open' | 'closed' | 'cancelled'
+  status: DemoTradeStatus
+  liquidation_price: number | null
+  close_reason: DemoCloseReason | null
   opened_at: string
+  filled_at: string | null
   closed_at: string | null
   created_at: string
+  reduce_only?: boolean
+  parent_trade_id?: string | null
+}
+
+export type DemoMutationOutcome = {
+  trade: DemoTrade
+  balance: number
 }
 
 export type AgentReferenceLink = {
@@ -211,6 +216,8 @@ export type ChatConversation = {
   updated_at: string
 }
 
+export type ChatMessageStatus = 'ok' | 'error'
+
 export type ChatMessage = {
   id: string
   conversation_id: string
@@ -218,6 +225,8 @@ export type ChatMessage = {
   content: string
   tokens_used: number | null
   analysis_meta?: ChatMessageAnalysisMeta | null
+  status?: ChatMessageStatus
+  error_code?: string | null
   created_at: string
 }
 
@@ -273,6 +282,8 @@ export type DashboardOverview = {
     volumeUsdD30: number
     volumeUsdD90: number
     volumeUsdAll: number
+    volumeUsdToday?: number
+    volumeUsdYear?: number
   }
 }
 
@@ -287,6 +298,61 @@ export type AssetDistributionItem = {
 export type AssetDistributionSummary = {
   totalUsd: number
   items: AssetDistributionItem[]
+}
+
+export type PnlSnapshotCalendar = {
+  days: PNLCalendarDay[]
+  months: PNLCalendarMonth[]
+}
+
+export const PNL_PERIODS = ['today', 'd7', 'd30', 'd90', 'year'] as const
+export type PnlPeriod = (typeof PNL_PERIODS)[number]
+
+export type FeeDailyPoint = {
+  date: string
+  exchange: Exchange
+  tradeType: FeeTradeType
+  feeUsd: number
+  volumeUsd: number
+}
+
+export type PnlSnapshotFees = {
+  periods: Record<PnlPeriod, FeeSummary>
+  totals: Record<PnlPeriod, { feeUsd: number; volumeUsd: number; tradeCount: number }>
+  daily: FeeDailyPoint[]
+}
+
+export type PnlSnapshotPayload = {
+  overview: DashboardOverview
+  chart: Record<ChartRange, PNLChartPoint[]>
+  calendar: PnlSnapshotCalendar
+  assets: AssetDistributionSummary
+  fees?: PnlSnapshotFees
+}
+
+export type PnlSnapshotRowInput = {
+  segment: TradeSegment
+  exchange: SnapshotExchange
+  payload: PnlSnapshotPayload
+  trade_count: number
+}
+
+export const PNL_JOB_STATUSES = ['queued', 'running', 'completed', 'failed'] as const
+export type PnlJobStatus = (typeof PNL_JOB_STATUSES)[number]
+
+export type PnlJob = {
+  id: string
+  status: PnlJobStatus
+  error: string | null
+  tradeCount: number | null
+  createdAt: string
+  startedAt: string | null
+  finishedAt: string | null
+}
+
+export type PnlSnapshotRecord = {
+  calculatedAt: string
+  payload: PnlSnapshotPayload
 }
 
 export type ExchangeAdapterTrade = {
@@ -342,4 +408,54 @@ export type SyncResult = {
   synced_trades: number
   new_trades: number
   last_synced: string
+}
+
+export type AiProvider = 'openrouter' | 'gemini' | 'openai' | 'anthropic' | 'xai'
+
+export type AiEffort = 'low' | 'medium' | 'high'
+
+export type AiModelEntry = {
+  id: string
+  label: string
+  supportsEffort: boolean
+}
+
+export type AiProviderStatus =
+  | 'active'
+  | 'invalid'
+  | 'expired'
+  | 'rate_limited'
+  | 'insufficient_credits'
+
+export type AiProviderSummary = {
+  provider: AiProvider
+  hasKey: boolean
+  keyHint: string | null
+  status: AiProviderStatus
+  lastErrorCode: string | null
+}
+
+export type AiProviderCredentials = {
+  provider: AiProvider
+  apiKey: string
+}
+
+export type AiChatTarget = AiProviderCredentials & {
+  model: string
+  effort: AiEffort | null
+}
+
+export type FeeTradeType = 'spot' | 'futures'
+
+export type FeeBreakdownRow = {
+  exchange: Exchange
+  tradeType: FeeTradeType
+  feeUsd: number
+  volumeUsd: number
+  tradeCount: number
+}
+
+export type FeeSummary = {
+  rows: FeeBreakdownRow[]
+  unconvertedCount: number
 }

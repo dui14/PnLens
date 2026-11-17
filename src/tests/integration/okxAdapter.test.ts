@@ -13,9 +13,9 @@ function fill(overrides: Record<string, string> = {}) {
     side: 'sell',
     fillSz: '0.1250',
     fillPx: '65000.1200',
-    fillFee: '-0.30',
+    fee: '-0.30',
     fillPnl: '1.5',
-    fillFeeCcy: 'USDT',
+    feeCcy: 'USDT',
     tradeId: 'fill-1',
     execType: 'T',
     ts: tradedAt,
@@ -64,13 +64,41 @@ describe('OKXAdapter', () => {
       side: 'sell',
       quantity: '0.1250',
       price: '65000.1200',
-      fee: '-0.30',
+      fee: '0.30',
       fee_currency: 'USDT',
       realized_pnl: '1.5',
       trade_type: 'spot',
       traded_at: new Date(1710000000000).toISOString(),
     })
     expect(JSON.stringify(trades).includes(credentials.apiSecret)).toBe(false)
+  })
+
+  it('reads the fee and fee currency from the fills-history fields', async () => {
+    handler = (url) => {
+      if (url.includes('/api/v5/trade/fills-history') && url.includes('instType=SPOT')) {
+        return jsonResponse({
+          code: '0',
+          data: [fill({ fee: '-0.01315791903', feeCcy: 'USDT', tradeId: 'fee-1' })],
+        })
+      }
+      return defaultRoute(url)
+    }
+
+    const trades = await new OKXAdapter().fetchTrades(credentials, recentSince())
+    expect(trades[0]).toMatchObject({ fee: '0.01315791903', fee_currency: 'USDT' })
+  })
+
+  it('falls back to the legacy fillFee fields', async () => {
+    handler = (url) => {
+      if (url.includes('/api/v5/trade/fills-history') && url.includes('instType=SPOT')) {
+        const { fee: _fee, feeCcy: _ccy, ...rest } = fill({ tradeId: 'legacy-1' })
+        return jsonResponse({ code: '0', data: [{ ...rest, fillFee: '-0.25', fillFeeCcy: 'BTC' }] })
+      }
+      return defaultRoute(url)
+    }
+
+    const trades = await new OKXAdapter().fetchTrades(credentials, recentSince())
+    expect(trades[0]).toMatchObject({ fee: '0.25', fee_currency: 'BTC' })
   })
 
   it('keeps the swap fill size and converts the symbol', async () => {

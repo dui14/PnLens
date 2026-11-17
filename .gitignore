@@ -1,47 +1,67 @@
 # Dependencies
 node_modules/
+.pnpm-store/
 
-# Next.js
+# Next.js build output
 src/.next/
-src/tsconfig.tsbuildinfo
+src/out/
+src/build/
+*.tsbuildinfo
 
-# Env
+# Local debug scripts
+src/scripts/
+
+# Test output
+coverage/
+test-results/
+playwright-report/
+
+# Env and secrets
 .env
 .env.*
+!.env.example
 keydata.env
-src/.env
-src/.env.*
+*.pem
 
-# Local tooling
-.vscode/
+# Supabase project files (local only)
+/supabase/
+
+# Local-only context and docs (repo root only)
+/ai-context/
+/database/
+/diagram/
+/.agents/
+/AGENTS.md
+/.github/copilot-instructions.md
+/spec/
+/docs/
+/tests/
+
+# AI and editor tooling
+.claude/
+.codegraph/
+.playwright-mcp/
 .cursor/
+.vscode/
+.mcp.json
 mcp.json
 **/*mcp.json
-
-# Context and local-only docs
-ai-context/
-database/
-diagram/
-.agents/
-AGENTS.md
-.github/copilot-instructions.md
-spec/
-docs/
-tests/
+CLAUDE.md
+CLAUDE.local.md
 
 # Markdown
 **/*.md
 !README.md
 
-# OS
-Thumbs.db
-desktop.ini
-.DS_Store
-
-# Tool logs
+# Logs
+*.log
 pnpm-debug.log*
 npm-debug.log*
 
-# Database
-database/
-supabase/ 
+# Deploy tooling
+.vercel/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini

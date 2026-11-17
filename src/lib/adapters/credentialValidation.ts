@@ -215,7 +215,7 @@ export function interpretBybitQueryApi(status: number, body: unknown): Credentia
   const permissionStrings: string[] = []
   collectStrings(result?.permissions, permissionStrings)
 
-  if (permissionStrings.includes('Withdraw')) {
+  if (readOnly !== true && permissionStrings.includes('Withdraw')) {
     return probeFailure('WITHDRAW_PERMISSION_DETECTED', permissionStrings)
   }
   if (readOnly === false) return probeFailure('TRADE_PERMISSION_DETECTED', ['readOnly'])

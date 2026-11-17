@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { BitgetAdapter } from '@/lib/adapters/bitgetAdapter'
-import { credentials, installFastSleep, jsonResponse, recentSince, requestUrl } from './support/http'
+import { credentials as hmacCredentials, installFastSleep, jsonResponse, recentSince, requestUrl, testPrivateKeyPem } from './support/http'
+
+const credentials = { ...hmacCredentials, apiSecret: testPrivateKeyPem }
 
 installFastSleep()
 
@@ -67,6 +69,30 @@ describe('BitgetAdapter', () => {
       }),
     ])
     expect(JSON.stringify(trades).includes(credentials.apiSecret)).toBe(false)
+  })
+
+  it('keeps an rToken spot fill with its mixed-case base coin symbol', async () => {
+    handler = (url) => {
+      if (url.includes('/api/v2/spot/trade/fills')) {
+        return jsonResponse({
+          code: '00000',
+          data: [spotFill({ tradeId: 'r-1', symbol: 'RNVDAUSDT', side: 'buy', size: '1.2500', priceAvg: '188.40' })],
+        })
+      }
+      return defaultRoute(url)
+    }
+
+    const trades = await new BitgetAdapter().fetchTrades(credentials, recentSince())
+    expect(trades).toEqual([
+      expect.objectContaining({
+        external_trade_id: 'r-1',
+        symbol: 'RNVDAUSDT',
+        side: 'buy',
+        quantity: '1.2500',
+        price: '188.40',
+        trade_type: 'spot',
+      }),
+    ])
   })
 
   it('reads a 10-digit cTime as seconds and drops a non-numeric cTime', async () => {
@@ -249,5 +275,79 @@ describe('BitgetAdapter', () => {
     expect(pages).toBeGreaterThanOrEqual(2)
     expect(seen[1]?.includes('idLessThan=spot-99') || seen[1]?.includes('idLessThan=spot-0')).toBe(true)
     expect(trades.filter((trade) => trade.external_trade_id === 'spot-0')).toHaveLength(1)
+  })
+
+  it('reads realized pnl from the profit field and sums feeDetail on a futures fill', async () => {
+    handler = (url) => {
+      if (url.includes('/api/v2/mix/order/fill-history') && url.includes('productType=USDT-FUTURES') && url.includes('startTime=')) {
+        return jsonResponse({
+          code: '00000',
+          data: {
+            fillList: [
+              {
+                tradeId: 'close-1',
+                symbol: 'XAUUSDT',
+                side: 'sell',
+                tradeSide: 'close',
+                baseVolume: '0.27',
+                price: '3918.23',
+                profit: '-0.7371',
+                feeDetail: [{ feeCoin: 'USDT', totalFee: '-0.63475326' }],
+                tradeScope: 'taker',
+                cTime: '1710000000000',
+              },
+              {
+                tradeId: 'open-1',
+                symbol: 'ETHUSDT',
+                side: 'buy',
+                tradeSide: 'open',
+                baseVolume: '0.02',
+                price: '1959.71',
+                profit: '0',
+                feeDetail: [{ feeCoin: 'USDT', totalFee: '-0.02351652' }],
+                tradeScope: 'maker',
+                cTime: '1710000001000',
+              },
+            ],
+            endId: '',
+          },
+        })
+      }
+      return defaultRoute(url)
+    }
+
+    const trades = await new BitgetAdapter().fetchTrades(credentials, recentSince())
+    expect(trades.find((trade) => trade.external_trade_id === 'close-1')).toMatchObject({
+      realized_pnl: '-0.7371',
+      fee: '-0.63475326',
+      fee_currency: 'USDT',
+      trade_type: 'futures',
+    })
+    expect(trades.find((trade) => trade.external_trade_id === 'open-1')).toMatchObject({
+      realized_pnl: '0',
+      fee: '-0.02351652',
+    })
+  })
+
+  it('chunks futures fills into 7-day windows clamped to 90 days', async () => {
+    const windows: Array<{ start: number; end: number }> = []
+    handler = (url) => {
+      if (url.includes('/api/v2/mix/order/fill-history') && url.includes('productType=USDT-FUTURES') && url.includes('startTime=')) {
+        const params = new URL(url).searchParams
+        windows.push({ start: Number(params.get('startTime')), end: Number(params.get('endTime')) })
+      }
+      return defaultRoute(url)
+    }
+
+    const until = new Date()
+    const since = new Date(until.getTime() - 365 * 24 * 60 * 60 * 1000)
+    await new BitgetAdapter().fetchTrades(credentials, since, until)
+
+    const day = 24 * 60 * 60 * 1000
+    expect(windows.length).toBeGreaterThanOrEqual(13)
+    expect(windows.length).toBeLessThanOrEqual(14)
+    expect(windows[0]?.start).toBeGreaterThanOrEqual(until.getTime() - 90 * day)
+    for (const window of windows) expect(window.end - window.start).toBeLessThan(7 * day)
+    expect(windows[windows.length - 1]?.end).toBe(until.getTime())
   })
 })

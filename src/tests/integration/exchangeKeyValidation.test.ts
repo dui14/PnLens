@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { NextRequest } from 'next/server'
-import { credentials, installFastSleep, jsonResponse } from './support/http'
+import { credentials, installFastSleep, jsonResponse, testEd25519PrivateKeyPem, testPrivateKeyPem } from './support/http'
 
 process.env.ENCRYPTION_MASTER_KEY = Buffer.alloc(32, 3).toString('base64')
 process.env.NEXT_PUBLIC_SUPABASE_URL = 'http://127.0.0.1:54321'
@@ -146,7 +146,7 @@ function withdrawBody(exchange: ExchangeName): unknown {
   }
   if (exchange === 'okx') return { code: '0', data: [{ perm: 'read_only,withdraw' }] }
   if (exchange === 'bybit') {
-    return { retCode: 0, result: { readOnly: 1, permissions: { Wallet: ['Withdraw'] }, ips: ['203.0.113.10'] } }
+    return { retCode: 0, result: { readOnly: 0, permissions: { Wallet: ['Withdraw'] }, ips: ['203.0.113.10'] } }
   }
   if (exchange === 'bitget') {
     return { code: '00000', data: { authorities: ['readonly', 'withdraw'], status: 'normal', ipList: ['203.0.113.10'] } }
@@ -171,10 +171,11 @@ function unknownBody(exchange: ExchangeName): unknown {
 }
 
 function connectBody(exchange: ExchangeName): Record<string, string> {
+  const asymmetric = exchange === 'binance' || exchange === 'bybit' || exchange === 'bitget'
   return {
     exchange,
     apiKey: credentials.apiKey,
-    apiSecret: SECRET,
+    apiSecret: asymmetric ? testPrivateKeyPem : SECRET,
     passphrase: credentials.passphrase,
     label: 'desk',
     proxy: USER_PROXY,
@@ -243,6 +244,24 @@ describe('exchange key validation', () => {
     })
   })
 
+  it('accepts a read-only bybit key whose permission template lists Withdraw', async () => {
+    httpState.respond = () =>
+      jsonResponse({
+        retCode: 0,
+        result: {
+          readOnly: 1,
+          permissions: { Wallet: ['AccountTransfer', 'SubMemberTransfer', 'Withdraw'], Spot: ['SpotTrade'] },
+          ips: ['203.0.113.10'],
+        },
+      })
+    const response = await postConnect(connectBody('bybit'))
+    const payload = await response.json()
+
+    expect(response.status).toBe(201)
+    expect(payload.success).toBe(true)
+    expect(db.createApiKey).toHaveBeenCalledTimes(1)
+  })
+
   const exchanges: ExchangeName[] = ['binance', 'okx', 'bybit', 'bitget', 'gateio']
 
   for (const exchange of exchanges) {
@@ -262,6 +281,8 @@ describe('exchange key validation', () => {
         const keyArgs = db.createApiKey.mock.calls[0]
         expect(keyArgs[8]).toBeNull()
         expect(keyArgs[9]).toBeNull()
+        const asymmetric = exchange === 'binance' || exchange === 'bybit' || exchange === 'bitget'
+        expect(keyArgs[10]).toBe(asymmetric ? 'rsa' : 'hmac')
         assertNoSecret(db.createApiKey.mock.calls)
         if (exchange === 'binance' || exchange === 'bybit') {
           expect(httpState.proxies.every((proxy) => proxy == null)).toBe(true)
@@ -437,11 +458,41 @@ describe('exchange key validation', () => {
     expect(db.createExchangeAccount).not.toHaveBeenCalled()
   })
 
+  describe('private key format', () => {
+    it('rejects a PEM without its footer before any exchange call', async () => {
+      const truncated = testPrivateKeyPem.replace(/-----END PRIVATE KEY-----\s*$/, '')
+      const response = await postConnect({ ...connectBody('binance'), apiSecret: truncated })
+      const payload = await response.json()
+      expect(response.status).toBe(400)
+      expect(payload.error).toBe('PRIVATE_KEY_INVALID')
+      expect(httpState.requests).toHaveLength(0)
+      expect(db.createApiKey).not.toHaveBeenCalled()
+    })
+
+    it('rejects an Ed25519 key for Bybit and Bitget', async () => {
+      for (const exchange of ['bybit', 'bitget'] as const) {
+        const response = await postConnect({ ...connectBody(exchange), apiSecret: testEd25519PrivateKeyPem })
+        const payload = await response.json()
+        expect(response.status).toBe(400)
+        expect(payload.error).toBe('PRIVATE_KEY_ALGORITHM_UNSUPPORTED')
+      }
+      expect(httpState.requests).toHaveLength(0)
+      expect(db.createApiKey).not.toHaveBeenCalled()
+    })
+
+    it('accepts an Ed25519 key for Binance and stores its format', async () => {
+      httpState.respond = () => jsonResponse(readOnlyBody('binance'))
+      const response = await postConnect({ ...connectBody('binance'), apiSecret: testEd25519PrivateKeyPem })
+      expect(response.status).toBe(201)
+      expect(db.createApiKey.mock.calls[0][10]).toBe('ed25519')
+    })
+  })
+
   describe('PUT /api/exchange/accounts/:id', () => {
   function putBody(): Record<string, string> {
     return {
       apiKey: credentials.apiKey,
-      apiSecret: SECRET,
+      apiSecret: testPrivateKeyPem,
       passphrase: credentials.passphrase,
       proxy: USER_PROXY,
     }
@@ -467,6 +518,7 @@ describe('exchange key validation', () => {
     expect(payload.success).toBe(true)
     assertNoSecret(payload)
     expect(db.updateApiKeyRecord).toHaveBeenCalledTimes(1)
+    expect(db.updateApiKeyRecord.mock.calls[0][8]).toBe('rsa')
     assertNoSecret(db.updateApiKeyRecord.mock.calls)
     expect(JSON.stringify(db.updateApiKeyRecord.mock.calls)).not.toContain('proxy')
     expect(httpState.requests.filter((url) => url.includes('/sapi/v1/account/apiRestrictions'))).toHaveLength(1)

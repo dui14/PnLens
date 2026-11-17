@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { NextRequest } from 'next/server'
 
 const claimExchangeScan = vi.hoisted(() => vi.fn())
+const getExchangeAccountById = vi.hoisted(() => vi.fn())
 const runScan = vi.hoisted(() => vi.fn(async () => undefined))
 
 vi.mock('next/server', async () => {
@@ -31,6 +32,7 @@ vi.mock('@/lib/scan/runScan', () => ({
 }))
 
 import { POST } from '@/app/api/exchange/sync/route'
+import { SCAN_COOLDOWN_MS } from '@/lib/scan/scanLimits'
 
 const accountId = '11111111-1111-4111-8111-111111111111'
 
