@@ -1,9 +1,17 @@
-import { createSupabaseServiceClient } from '@/lib/db/supabase-server'
+import type { SupabaseClient } from '@supabase/supabase-js'
 import type { Exchange } from '@/lib/types'
 import type { ToolExchange, ToolPeriod } from '@/lib/tools/definitions'
+import {
+  TOOL_PNL_STATS_MAX_ROWS,
+  TOOL_TRADE_LIMIT_DEFAULT,
+  TOOL_TRADE_LIMIT_MAX,
+  TOOL_TRADE_LIMIT_MIN,
+} from '@/lib/ai/guardrails'
 
-const HISTORY_DEFAULT_LIMIT = 20
-const HISTORY_MAX_LIMIT = 50
+export type TradeToolContext = {
+  supabase: SupabaseClient
+  userId: string
+}
 
 type GetTradeHistoryArgs = {
   exchange?: ToolExchange
@@ -112,12 +120,15 @@ function buildTradeSummaryRow(trade: NormalizedTrade): { symbol: string; pnl: nu
 }
 
 export async function getTradeHistoryTool(
-  userId: string,
+  { supabase, userId }: TradeToolContext,
   args: GetTradeHistoryArgs
 ): Promise<Record<string, unknown>> {
-  const supabase = createSupabaseServiceClient()
   const symbol = args.symbol?.trim().toUpperCase()
-  const limit = clampNumber(args.limit ?? HISTORY_DEFAULT_LIMIT, 1, HISTORY_MAX_LIMIT)
+  const limit = clampNumber(
+    args.limit ?? TOOL_TRADE_LIMIT_DEFAULT,
+    TOOL_TRADE_LIMIT_MIN,
+    TOOL_TRADE_LIMIT_MAX
+  )
   const exchangeFilter = mapToolExchange(args.exchange)
 
   let query = supabase
@@ -165,10 +176,9 @@ export async function getTradeHistoryTool(
 }
 
 export async function getPnlStatsTool(
-  userId: string,
+  { supabase, userId }: TradeToolContext,
   args: GetPnlStatsArgs
 ): Promise<Record<string, unknown>> {
-  const supabase = createSupabaseServiceClient()
   const period = args.period ?? '30d'
   const periodDays = getPeriodDays(period)
   const exchangeFilter = mapToolExchange(args.exchange)
@@ -185,6 +195,7 @@ export async function getPnlStatsTool(
     .gt('quantity', 0)
     .gt('price', 0)
     .order('traded_at', { ascending: false })
+    .limit(TOOL_PNL_STATS_MAX_ROWS)
 
   if (exchangeFilter) {
     query = query.eq('exchange_accounts.exchange', exchangeFilter)

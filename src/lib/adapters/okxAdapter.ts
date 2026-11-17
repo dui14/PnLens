@@ -1,3 +1,4 @@
+import { HistoryGapTracker, type HistoryGap } from './historyGaps'
 import type {
   ExchangeAdapterTrade,
   ExchangeCredentials,
@@ -6,18 +7,38 @@ import type {
 } from '@/lib/types'
 import { buildOkxSignedHeaders } from '@/lib/adapters/okxApi'
 import type { ExchangeAdapter } from './exchangeFactory'
+import {
+  interpretOkxConfig,
+  probeFailure,
+  readJson,
+  type CredentialProbeResult,
+} from './credentialValidation'
 
-const BASE_URL = 'https://www.okx.com'
+import { OKX_BASE_URL as BASE_URL } from './exchangeBases'
+import { fetchExchange } from './httpClient'
+import { throwOnServerPage } from './exchangeWindowError'
+import { DAY_MS, HISTORY_RETRY, SCAN_LOOKBACK_MS } from '@/lib/scan/scanLimits'
+import {
+  TradeRejectCounter,
+  addDecimals,
+  decimalOrZero,
+  flexibleTimeToIso,
+  isNegativeDecimal,
+  negateDecimal,
+  optionalDecimal,
+  requiredDecimal,
+  type TradeRejectCounts,
+} from './tradeFields'
 const REQUEST_TIMEOUT = 10_000
-const DEFAULT_LOOKBACK_MS = 365 * 24 * 60 * 60 * 1000
-const OKX_HISTORY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
+const DEFAULT_LOOKBACK_MS = SCAN_LOOKBACK_MS
+const OKX_HISTORY_WINDOW_MS = 7 * DAY_MS
 const OKX_PAGE_LIMIT = 100
 
 async function fetchWithTimeout(url: string, options?: RequestInit): Promise<Response> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT)
   try {
-    return await fetch(url, { ...options, signal: controller.signal })
+    return await fetchExchange(url, { ...options, signal: controller.signal })
   } finally {
     clearTimeout(timer)
   }
@@ -27,18 +48,43 @@ async function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-async function fetchWithRetry(url: string, options?: RequestInit, attempt = 0): Promise<Response> {
-  const response = await fetchWithTimeout(url, options)
-  if (response.status === 429 && attempt < 4) {
-    const backoff = Math.min(Math.pow(2, attempt) * 1000, 60_000)
+type RequestSource = RequestInit | (() => RequestInit)
+
+function resolveRequest(source?: RequestSource): RequestInit | undefined {
+  return typeof source === 'function' ? source() : source
+}
+
+async function fetchWithRetry(url: string, options?: RequestSource, attempt = 0): Promise<Response> {
+  const response = await fetchWithTimeout(url, resolveRequest(options))
+  if (attempt < HISTORY_RETRY.maxAttempts && (response.status === 429 || (await isBodyRateLimited(response)))) {
+    const backoff = Math.min(Math.pow(2, attempt) * HISTORY_RETRY.baseDelayMs, HISTORY_RETRY.maxDelayMs)
     await sleep(backoff + Math.random() * 500)
     return fetchWithRetry(url, options, attempt + 1)
   }
   return response
 }
 
+async function isBodyRateLimited(response: Response): Promise<boolean> {
+  try {
+    const body = (await response.clone().json()) as { code?: string }
+    return body?.code === HISTORY_RETRY.okxRateLimitCode
+  } catch {
+    return false
+  }
+}
+
 export class OKXAdapter implements ExchangeAdapter {
-  private futuresContractSpecsPromise: Promise<Map<string, OKXFuturesContractSpec>> | null = null
+  private readonly rejections = new TradeRejectCounter()
+  private readonly gaps = new HistoryGapTracker()
+
+  historyGaps(): HistoryGap[] {
+    return this.gaps.gaps
+  }
+
+
+  rejectedTradeCounts(): TradeRejectCounts {
+    return this.rejections.counts
+  }
 
   private buildHeaders(
     credentials: ExchangeCredentials,
@@ -56,25 +102,23 @@ export class OKXAdapter implements ExchangeAdapter {
     })
   }
 
-  async validateCredentials(credentials: ExchangeCredentials): Promise<boolean> {
+  async validateCredentials(credentials: ExchangeCredentials): Promise<CredentialProbeResult> {
     try {
-      if (!credentials.passphrase) return false
-      const path = '/api/v5/account/balance'
-      const headers = this.buildHeaders(credentials, 'GET', path)
-      const response = await fetchWithRetry(`${BASE_URL}${path}`, { headers })
-      if (!response.ok) return false
-      const data = (await response.json()) as { code: string }
-      return data.code === '0'
+      if (!credentials.passphrase) return probeFailure('INVALID_SECRET_OR_PASSPHRASE')
+      const path = '/api/v5/account/config'
+      const request = () => ({ headers: this.buildHeaders(credentials, 'GET', path) })
+      const response = await fetchWithRetry(`${BASE_URL}${path}`, request)
+      return interpretOkxConfig(response.status, await readJson(response))
     } catch {
-      return false
+      return probeFailure('EXCHANGE_UNREACHABLE')
     }
   }
 
   async hasWithdrawPermission(credentials: ExchangeCredentials): Promise<boolean> {
     try {
       const path = '/api/v5/account/config'
-      const headers = this.buildHeaders(credentials, 'GET', path)
-      const response = await fetchWithRetry(`${BASE_URL}${path}`, { headers })
+      const request = () => ({ headers: this.buildHeaders(credentials, 'GET', path) })
+      const response = await fetchWithRetry(`${BASE_URL}${path}`, request)
       if (!response.ok) return false
       const data = (await response.json()) as { code: string; data?: Array<{ perm?: string }> }
       if (data.code !== '0') return false
@@ -85,12 +129,16 @@ export class OKXAdapter implements ExchangeAdapter {
     }
   }
 
-  async fetchTrades(credentials: ExchangeCredentials, since?: Date): Promise<ExchangeAdapterTrade[]> {
+  private scanEndMs = 0
+
+  async fetchTrades(credentials: ExchangeCredentials, since?: Date, until?: Date): Promise<ExchangeAdapterTrade[]> {
+    this.scanEndMs = until?.getTime() ?? Date.now()
+    this.rejections.reset()
+    this.gaps.reset()
     const startDate = since ?? new Date(Date.now() - DEFAULT_LOOKBACK_MS)
-    const futuresContractSpecs = await this.getFuturesContractSpecs()
 
     const [fillTrades, fundingTrades] = await Promise.all([
-      this.fetchTradeFills(credentials, startDate, futuresContractSpecs),
+      this.fetchTradeFills(credentials, startDate),
       this.fetchFundingBills(credentials, startDate),
     ])
 
@@ -99,16 +147,15 @@ export class OKXAdapter implements ExchangeAdapter {
       return merged
     }
 
-    return this.fetchBillsArchiveFallback(credentials, startDate, futuresContractSpecs)
+    return this.fetchBillsArchiveFallback(credentials, startDate)
   }
 
   private async fetchTradeFills(
     credentials: ExchangeCredentials,
-    since: Date,
-    futuresContractSpecs: Map<string, OKXFuturesContractSpec>
+    since: Date
   ): Promise<ExchangeAdapterTrade[]> {
     const startTime = since.getTime()
-    const now = Date.now()
+    const now = this.scanEndMs
     const instTypes: Array<'SPOT' | 'SWAP' | 'FUTURES'> = ['SPOT', 'SWAP', 'FUTURES']
     const rows: ExchangeAdapterTrade[] = []
 
@@ -127,21 +174,22 @@ export class OKXAdapter implements ExchangeAdapter {
           })
 
           const path = `/api/v5/trade/fills-history?${query.toString()}`
-          const headers = this.buildHeaders(credentials, 'GET', path)
-          const response = await fetchWithRetry(`${BASE_URL}${path}`, { headers })
+          const request = () => ({ headers: this.buildHeaders(credentials, 'GET', path) })
+          const response = await fetchWithRetry(`${BASE_URL}${path}`, request)
 
-          if (!response.ok) break
+          throwOnServerPage(response)
+          if (!response.ok) { this.gaps.record(instType.toLowerCase(), windowStart, cursorEnd); break }
 
           const payload = (await response.json()) as { code: string; data?: OKXFill[] }
-          if (payload.code !== '0') break
+          if (payload.code !== '0') { this.gaps.record(instType.toLowerCase(), windowStart, cursorEnd); break }
 
           const list = Array.isArray(payload.data) ? payload.data : []
           if (list.length === 0) break
 
           let oldestTs = cursorEnd
           for (const item of list) {
-            const normalized = this.normalizeFill(item, futuresContractSpecs)
-            rows.push(normalized)
+            const normalized = this.normalizeFill(item)
+            if (normalized) rows.push(normalized)
 
             const itemTs = Number.parseInt(String(item.ts ?? ''), 10)
             if (Number.isFinite(itemTs)) {
@@ -172,7 +220,7 @@ export class OKXAdapter implements ExchangeAdapter {
     since: Date
   ): Promise<ExchangeAdapterTrade[]> {
     const startTime = since.getTime()
-    const now = Date.now()
+    const now = this.scanEndMs
     const rows: ExchangeAdapterTrade[] = []
     let windowStart = startTime
 
@@ -188,20 +236,22 @@ export class OKXAdapter implements ExchangeAdapter {
         })
 
         const path = `/api/v5/account/bills-archive?${query.toString()}`
-        const headers = this.buildHeaders(credentials, 'GET', path)
-        const response = await fetchWithRetry(`${BASE_URL}${path}`, { headers })
+        const request = () => ({ headers: this.buildHeaders(credentials, 'GET', path) })
+        const response = await fetchWithRetry(`${BASE_URL}${path}`, request)
 
-        if (!response.ok) break
+        throwOnServerPage(response)
+          if (!response.ok) { this.gaps.record('funding', windowStart, cursorEnd); break }
 
         const payload = (await response.json()) as { code: string; data?: OKXBill[] }
-        if (payload.code !== '0') break
+        if (payload.code !== '0') { this.gaps.record('funding', windowStart, cursorEnd); break }
 
         const list = Array.isArray(payload.data) ? payload.data : []
         if (list.length === 0) break
 
         let oldestTs = cursorEnd
         for (const item of list) {
-          rows.push(this.normalizeFundingBill(item))
+          const normalized = this.normalizeFundingBill(item)
+          if (normalized) rows.push(normalized)
 
           const itemTs = Number.parseInt(String(item.ts ?? ''), 10)
           if (Number.isFinite(itemTs)) {
@@ -226,11 +276,10 @@ export class OKXAdapter implements ExchangeAdapter {
 
   private async fetchBillsArchiveFallback(
     credentials: ExchangeCredentials,
-    since: Date,
-    futuresContractSpecs: Map<string, OKXFuturesContractSpec>
+    since: Date
   ): Promise<ExchangeAdapterTrade[]> {
     const startTime = since.getTime()
-    const now = Date.now()
+    const now = this.scanEndMs
     const rows: ExchangeAdapterTrade[] = []
     let windowStart = startTime
 
@@ -245,13 +294,14 @@ export class OKXAdapter implements ExchangeAdapter {
         })
 
         const path = `/api/v5/account/bills-archive?${query.toString()}`
-        const headers = this.buildHeaders(credentials, 'GET', path)
-        const response = await fetchWithRetry(`${BASE_URL}${path}`, { headers })
+        const request = () => ({ headers: this.buildHeaders(credentials, 'GET', path) })
+        const response = await fetchWithRetry(`${BASE_URL}${path}`, request)
 
-        if (!response.ok) break
+        throwOnServerPage(response)
+          if (!response.ok) { this.gaps.record('bills', windowStart, cursorEnd); break }
 
         const payload = (await response.json()) as { code: string; data?: OKXBill[] }
-        if (payload.code !== '0') break
+        if (payload.code !== '0') { this.gaps.record('bills', windowStart, cursorEnd); break }
 
         const list = Array.isArray(payload.data) ? payload.data : []
         if (list.length === 0) break
@@ -259,7 +309,8 @@ export class OKXAdapter implements ExchangeAdapter {
         let oldestTs = cursorEnd
         for (const item of list) {
           if (!['2', '8', '14'].includes(String(item.type ?? ''))) continue
-          rows.push(this.normalizeBill(item, futuresContractSpecs))
+          const normalized = this.normalizeBill(item)
+          if (normalized) rows.push(normalized)
 
           const itemTs = Number.parseInt(String(item.ts ?? ''), 10)
           if (Number.isFinite(itemTs)) {
@@ -284,8 +335,8 @@ export class OKXAdapter implements ExchangeAdapter {
 
   async fetchOpenPositions(credentials: ExchangeCredentials): Promise<UnrealizedPosition[]> {
     const path = '/api/v5/account/positions'
-    const headers = this.buildHeaders(credentials, 'GET', path)
-    const response = await fetchWithRetry(`${BASE_URL}${path}`, { headers })
+    const request = () => ({ headers: this.buildHeaders(credentials, 'GET', path) })
+    const response = await fetchWithRetry(`${BASE_URL}${path}`, request)
 
     if (!response.ok) return []
 
@@ -308,8 +359,8 @@ export class OKXAdapter implements ExchangeAdapter {
 
   async fetchBalances(credentials: ExchangeCredentials): Promise<AssetBalance[]> {
     const path = '/api/v5/account/balance'
-    const headers = this.buildHeaders(credentials, 'GET', path)
-    const response = await fetchWithRetry(`${BASE_URL}${path}`, { headers })
+    const request = () => ({ headers: this.buildHeaders(credentials, 'GET', path) })
+    const response = await fetchWithRetry(`${BASE_URL}${path}`, request)
 
     if (!response.ok) return []
 
@@ -339,214 +390,94 @@ export class OKXAdapter implements ExchangeAdapter {
     return result
   }
 
-  private normalizeBill(
-    bill: OKXBill,
-    futuresContractSpecs: Map<string, OKXFuturesContractSpec>
-  ): ExchangeAdapterTrade {
-    const pnl = parseFloat(bill.pnl ?? '0')
-    const fee = parseFloat(bill.fee ?? '0')
-    const amount = pnl + fee
-    const side: 'buy' | 'sell' = amount >= 0 ? 'sell' : 'buy'
-    const rawQuantity = parseFloat(bill.sz ?? '0')
-    const rawPrice = parseFloat(bill.px ?? '0')
-    const quantity = this.normalizeFuturesQuantity(
-      bill.instType,
-      bill.instId,
-      rawQuantity,
-      rawPrice,
-      futuresContractSpecs
-    )
-
+  private normalizeBill(bill: OKXBill): ExchangeAdapterTrade | null {
+    const tradedAt = flexibleTimeToIso(bill.ts)
+    if (!tradedAt) return this.rejections.reject('INVALID_TIMESTAMP')
+    const billId = String(bill.billId ?? '').trim()
+    if (!billId) return this.rejections.reject('MISSING_ID')
+    const pnl = decimalOrZero(bill.pnl, this.rejections)
+    if (!pnl) return null
+    const fee = decimalOrZero(bill.fee, this.rejections)
+    if (!fee) return null
+    const amount = addDecimals(pnl, fee)
+    if (!amount) return this.rejections.reject('INVALID_NUMBER')
+    const quantity = decimalOrZero(bill.sz, this.rejections)
+    if (!quantity) return null
+    const price = decimalOrZero(bill.px, this.rejections)
+    if (!price) return null
     return {
-      external_trade_id: `okx_bill_${bill.billId}`,
+      external_trade_id: `okx_bill_${billId}`,
       symbol: (bill.instId ?? '').replace(/-/g, ''),
-      side,
+      side: isNegativeDecimal(amount) ? 'buy' : 'sell',
       quantity,
-      price: Number.isFinite(rawPrice) ? rawPrice : 0,
-      fee: Math.abs(fee),
+      price,
+      fee,
       fee_currency: bill.ccy ?? 'USDT',
       realized_pnl: amount,
-      funding_fee: bill.type === '8' ? fee : 0,
+      funding_fee: bill.type === '8' ? fee : '0',
       income_type: bill.type,
       trade_type: bill.instType === 'SPOT' ? 'spot' : 'futures',
-      traded_at: new Date(parseInt(bill.ts, 10)).toISOString(),
+      traded_at: tradedAt,
       raw_data: bill as unknown as Record<string, unknown>,
     }
   }
 
-  private normalizeFill(
-    fill: OKXFill,
-    futuresContractSpecs: Map<string, OKXFuturesContractSpec>
-  ): ExchangeAdapterTrade {
-    const symbol = (fill.instId ?? '').replace(/-/g, '')
-    const side: 'buy' | 'sell' = (fill.side ?? '').toLowerCase() === 'sell' ? 'sell' : 'buy'
+  private normalizeFill(fill: OKXFill): ExchangeAdapterTrade | null {
+    const tradedAt = flexibleTimeToIso(fill.ts)
+    if (!tradedAt) return this.rejections.reject('INVALID_TIMESTAMP')
+    const tradeId = String(fill.tradeId ?? fill.ordId ?? '').trim()
+    if (!tradeId) return this.rejections.reject('MISSING_ID')
+    const quantity = requiredDecimal(fill.fillSz, this.rejections)
+    if (!quantity) return null
+    const price = requiredDecimal(fill.fillPx, this.rejections)
+    if (!price) return null
+    const signedFee = decimalOrZero(fill.fee ?? fill.fillFee, this.rejections)
+    if (!signedFee) return null
+    const fee = negateDecimal(signedFee)
+    const realizedPnl = optionalDecimal(fill.fillPnl, this.rejections)
+    if (realizedPnl === undefined) return null
     const instType = String(fill.instType ?? '').toUpperCase()
-
-    const rawQuantity = parseFloat(fill.fillSz ?? '0')
-    const rawPrice = parseFloat(fill.fillPx ?? '0')
-    const rawFee = parseFloat(fill.fillFee ?? '0')
-    const rawPnl = parseFloat(fill.fillPnl ?? '')
-    const parsedTs = Number.parseInt(String(fill.ts ?? ''), 10)
-
-    const price = Number.isFinite(rawPrice) ? rawPrice : 0
-    const quantity = this.normalizeFuturesQuantity(
-      instType,
-      fill.instId,
-      rawQuantity,
-      price,
-      futuresContractSpecs
-    )
-    const fee = Number.isFinite(rawFee) ? Math.abs(rawFee) : 0
-    const realizedPnl = Number.isFinite(rawPnl) ? rawPnl : null
-    const tradedAt = Number.isFinite(parsedTs)
-      ? new Date(parsedTs).toISOString()
-      : new Date().toISOString()
-
-    const tradeType = instType === 'SPOT' ? 'spot' : 'futures'
-    const tradeId = String(fill.tradeId ?? fill.ordId ?? `${symbol}:${tradedAt}`).trim()
-
     return {
       external_trade_id: `okx_fill_${tradeId}`,
-      symbol,
-      side,
+      symbol: (fill.instId ?? '').replace(/-/g, ''),
+      side: (fill.side ?? '').toLowerCase() === 'sell' ? 'sell' : 'buy',
       quantity,
       price,
       fee,
-      fee_currency: fill.fillFeeCcy ?? 'USDT',
+      fee_currency: fill.feeCcy ?? fill.fillFeeCcy ?? 'USDT',
       realized_pnl: realizedPnl,
-      funding_fee: 0,
+      funding_fee: '0',
       income_type: fill.execType ?? null,
-      trade_type: tradeType,
+      trade_type: instType === 'SPOT' ? 'spot' : 'futures',
       traded_at: tradedAt,
       raw_data: fill as unknown as Record<string, unknown>,
     }
   }
 
-  private async getFuturesContractSpecs(): Promise<Map<string, OKXFuturesContractSpec>> {
-    if (!this.futuresContractSpecsPromise) {
-      this.futuresContractSpecsPromise = this.fetchFuturesContractSpecs()
-    }
-
-    return this.futuresContractSpecsPromise
-  }
-
-  private async fetchFuturesContractSpecs(): Promise<Map<string, OKXFuturesContractSpec>> {
-    const specs = new Map<string, OKXFuturesContractSpec>()
-    const instTypes: Array<'SWAP' | 'FUTURES'> = ['SWAP', 'FUTURES']
-
-    for (const instType of instTypes) {
-      const query = new URLSearchParams({ instType })
-      const path = `/api/v5/public/instruments?${query.toString()}`
-      const response = await fetchWithRetry(`${BASE_URL}${path}`)
-      if (!response.ok) {
-        continue
-      }
-
-      const payload = (await response.json()) as {
-        code: string
-        data?: OKXPublicInstrument[]
-      }
-
-      if (payload.code !== '0' || !Array.isArray(payload.data)) {
-        continue
-      }
-
-      for (const instrument of payload.data) {
-        const instId = String(instrument.instId ?? '').toUpperCase()
-        if (!instId) {
-          continue
-        }
-
-        const ctVal = Number.parseFloat(String(instrument.ctVal ?? ''))
-        if (!Number.isFinite(ctVal) || ctVal <= 0) {
-          continue
-        }
-
-        const [baseCcyRaw, quoteCcyRaw] = instId.split('-')
-        const baseCcy = String(baseCcyRaw ?? '').toUpperCase()
-        const quoteCcy = String(quoteCcyRaw ?? '').toUpperCase()
-        const ctValCcyRaw = String(instrument.ctValCcy ?? '').toUpperCase()
-
-        specs.set(instId, {
-          ctVal,
-          ctValCcy: ctValCcyRaw || null,
-          baseCcy,
-          quoteCcy,
-        })
-      }
-    }
-
-    return specs
-  }
-
-  private normalizeFuturesQuantity(
-    instType: string,
-    instId: string | undefined,
-    rawQuantity: number,
-    price: number,
-    futuresContractSpecs: Map<string, OKXFuturesContractSpec>
-  ): number {
-    const quantity = Number.isFinite(rawQuantity) ? Math.abs(rawQuantity) : 0
-    if (quantity === 0) {
-      return 0
-    }
-
-    const upperInstType = instType.toUpperCase()
-    if (upperInstType !== 'SWAP' && upperInstType !== 'FUTURES') {
-      return quantity
-    }
-
-    const instKey = String(instId ?? '').toUpperCase()
-    if (!instKey) {
-      return quantity
-    }
-
-    const contract = futuresContractSpecs.get(instKey)
-    if (!contract || contract.ctVal <= 0) {
-      return quantity
-    }
-
-    if (contract.ctValCcy && contract.baseCcy && contract.ctValCcy === contract.baseCcy) {
-      return quantity * contract.ctVal
-    }
-
-    if (
-      contract.ctValCcy &&
-      contract.quoteCcy &&
-      contract.ctValCcy === contract.quoteCcy &&
-      Number.isFinite(price) &&
-      price > 0
-    ) {
-      return (quantity * contract.ctVal) / price
-    }
-
-    return quantity
-  }
-
-  private normalizeFundingBill(bill: OKXBill): ExchangeAdapterTrade {
-    const pnl = parseFloat(bill.pnl ?? '0')
-    const fee = parseFloat(bill.fee ?? '0')
-    const amount =
-      (Number.isFinite(pnl) ? pnl : 0) +
-      (Number.isFinite(fee) ? fee : 0)
-    const side: 'buy' | 'sell' = amount >= 0 ? 'sell' : 'buy'
-    const parsedTs = Number.parseInt(String(bill.ts ?? ''), 10)
-
+  private normalizeFundingBill(bill: OKXBill): ExchangeAdapterTrade | null {
+    const tradedAt = flexibleTimeToIso(bill.ts)
+    if (!tradedAt) return this.rejections.reject('INVALID_TIMESTAMP')
+    const billId = String(bill.billId ?? '').trim()
+    if (!billId) return this.rejections.reject('MISSING_ID')
+    const pnl = decimalOrZero(bill.pnl, this.rejections)
+    if (!pnl) return null
+    const fee = decimalOrZero(bill.fee, this.rejections)
+    if (!fee) return null
+    const amount = addDecimals(pnl, fee)
+    if (!amount) return this.rejections.reject('INVALID_NUMBER')
     return {
-      external_trade_id: `okx_funding_${bill.billId}`,
+      external_trade_id: `okx_funding_${billId}`,
       symbol: (bill.instId ?? '').replace(/-/g, ''),
-      side,
-      quantity: 0,
-      price: 0,
-      fee: 0,
+      side: isNegativeDecimal(amount) ? 'buy' : 'sell',
+      quantity: '0',
+      price: '0',
+      fee: '0',
       fee_currency: bill.ccy ?? 'USDT',
       realized_pnl: amount,
       funding_fee: amount,
       income_type: 'funding_fee',
       trade_type: bill.instType === 'SPOT' ? 'spot' : 'futures',
-      traded_at: Number.isFinite(parsedTs)
-        ? new Date(parsedTs).toISOString()
-        : new Date().toISOString(),
+      traded_at: tradedAt,
       raw_data: bill as unknown as Record<string, unknown>,
     }
   }
@@ -598,6 +529,8 @@ type OKXFill = {
   side?: string
   fillSz?: string
   fillPx?: string
+  fee?: string
+  feeCcy?: string
   fillFee?: string
   fillFeeCcy?: string
   fillPnl?: string
@@ -613,17 +546,4 @@ type OKXPosition = {
   markPx: string
   upl: string
   lever: string
-}
-
-type OKXPublicInstrument = {
-  instId?: string
-  ctVal?: string
-  ctValCcy?: string
-}
-
-type OKXFuturesContractSpec = {
-  ctVal: number
-  ctValCcy: string | null
-  baseCcy: string
-  quoteCcy: string
 }

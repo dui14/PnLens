@@ -1,36 +1,46 @@
 'use client'
 
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { createSupabaseBrowserClient } from '@/lib/db/supabase-browser'
+import { useT } from '@/lib/i18n/client'
+import { AutofillSafeInput } from '@/components/ui/AutofillSafeInput'
+import { AuthCard } from '@/components/features/auth/AuthCard'
+import { buildPasswordSchema } from '@/lib/validators/auth'
+import { fillTemplate } from '@/lib/i18n/format'
+import type { Dictionary } from '@/lib/i18n'
 
-const registerSchema = z
-  .object({
-    displayName: z.string().min(2, 'Display name must be at least 2 characters'),
-    email: z.string().email('Please enter a valid email'),
-    password: z.string().min(8, 'Password must be at least 8 characters'),
-    confirmPassword: z.string(),
-    terms: z.boolean().refine((val) => val === true, 'You must accept the terms'),
-  })
-  .refine((data) => data.password === data.confirmPassword, {
-    message: 'Passwords do not match',
-    path: ['confirmPassword'],
-  })
+function buildRegisterSchema(t: Dictionary) {
+  return z
+    .object({
+      displayName: z.string().min(2, t.auth.validation.displayNameMin),
+      email: z.string().email(t.auth.validation.email),
+      password: buildPasswordSchema(t.auth.validation.passwordMin),
+      confirmPassword: z.string(),
+      terms: z.boolean().refine((val) => val === true, t.auth.validation.termsRequired),
+    })
+    .refine((data) => data.password === data.confirmPassword, {
+      message: t.auth.validation.passwordMismatch,
+      path: ['confirmPassword'],
+    })
+}
 
-type RegisterFormValues = z.infer<typeof registerSchema>
+type RegisterFormValues = z.infer<ReturnType<typeof buildRegisterSchema>>
 
-function getPasswordStrength(password: string): { level: number; label: string } {
+function getPasswordStrength(
+  password: string,
+  labels: readonly string[]
+): { level: number; label: string } {
   if (!password) return { level: 0, label: '' }
   let score = 0
   if (password.length >= 8) score++
   if (/[A-Z]/.test(password)) score++
   if (/[0-9]/.test(password)) score++
   if (/[^A-Za-z0-9]/.test(password)) score++
-  const labels = ['', 'Weak', 'Fair', 'Medium', 'Strong']
   return { level: score, label: labels[score] ?? '' }
 }
 
@@ -47,7 +57,9 @@ function GoogleIcon(): React.JSX.Element {
 
 
 export function RegisterForm(): React.JSX.Element {
+  const { t } = useT()
   const router = useRouter()
+  const registerSchema = useMemo(() => buildRegisterSchema(t), [t])
   const [showPassword, setShowPassword] = useState(false)
   const [authError, setAuthError] = useState<string | null>(null)
   const [googleLoading, setGoogleLoading] = useState(false)
@@ -62,7 +74,7 @@ export function RegisterForm(): React.JSX.Element {
   })
 
   const watchPassword = watch('password', '')
-  const strength = getPasswordStrength(watchPassword)
+  const strength = getPasswordStrength(watchPassword, t.auth.register.strengthLabels)
 
   const handleGoogleSignUp = async (): Promise<void> => {
     setGoogleLoading(true)
@@ -103,35 +115,14 @@ export function RegisterForm(): React.JSX.Element {
   }
 
   return (
-    <div className="relative flex min-h-screen w-full flex-col overflow-x-hidden py-5 px-4 md:px-10">
-      <div className="max-w-[960px] mx-auto w-full">
-        <header className="flex items-center justify-between whitespace-nowrap border-b border-slate-200 dark:border-slate-800 px-4 py-4 mb-8">
-          <div className="flex items-center gap-3 text-primary">
-            <div className="size-8 flex items-center justify-center rounded-lg bg-primary/10">
-              <span className="material-symbols-outlined text-primary">analytics</span>
-            </div>
-            <h2 className="text-slate-900 dark:text-white text-xl font-bold leading-tight tracking-tight">
-              Track PNL Pro
-            </h2>
-          </div>
-          <Link
-            href="/login"
-            className="flex items-center justify-center rounded-lg h-10 w-10 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors"
-          >
-            <span className="material-symbols-outlined">close</span>
-          </Link>
-        </header>
-
-        <div className="flex flex-col gap-2 px-4 mb-8">
-          <h1 className="text-slate-900 dark:text-white text-4xl font-black leading-tight tracking-tight">
-            Create Account
-          </h1>
-          <p className="text-slate-500 dark:text-slate-400 text-base font-normal">
-            Join our community and start your journey today
-          </p>
-        </div>
-
-        <form onSubmit={handleSubmit(onSubmit)} className="flex flex-col gap-6 px-4 max-w-[520px]" autoComplete="off">
+    <div className="bg-background-light dark:bg-background-dark text-slate-900 dark:text-slate-100 min-h-dvh sm:min-h-screen flex items-center justify-center px-4 py-6">
+      <AuthCard
+        title={t.auth.register.title}
+        subtitle={t.auth.register.subtitle}
+        maxWidthClass="max-w-xl"
+        footer={fillTemplate(t.auth.register.copyright, { year: new Date().getFullYear() })}
+      >
+        <form onSubmit={handleSubmit(onSubmit)} className="flex flex-col gap-5" autoComplete="off">
           {authError && (
             <div className="rounded-lg bg-rose-500/10 border border-rose-500/20 px-4 py-3 text-sm text-rose-400">
               {authError}
@@ -139,18 +130,18 @@ export function RegisterForm(): React.JSX.Element {
           )}
           <div className="flex flex-col gap-2">
             <label className="text-slate-700 dark:text-slate-200 text-sm font-semibold leading-normal">
-              Display Name
+              {t.auth.displayName}
             </label>
             <div className="relative">
               <span className="material-symbols-outlined absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 text-xl">
                 person
               </span>
-              <input
+              <AutofillSafeInput
                 {...register('displayName')}
                 type="text"
-                placeholder="How should we call you?"
+                placeholder={t.auth.register.displayNamePlaceholder}
                 autoComplete="off"
-                className="flex w-full rounded-lg text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-primary/50 border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50 h-14 placeholder:text-slate-400 pl-12 pr-4 text-base font-normal transition-all"
+                className="flex w-full rounded-lg text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-primary/50 border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50 h-12 placeholder:text-slate-400 pl-12 pr-4 text-base font-normal transition-all"
               />
             </div>
             {errors.displayName && (
@@ -160,18 +151,18 @@ export function RegisterForm(): React.JSX.Element {
 
           <div className="flex flex-col gap-2">
             <label className="text-slate-700 dark:text-slate-200 text-sm font-semibold leading-normal">
-              Email Address
+              {t.auth.emailAddress}
             </label>
             <div className="relative">
               <span className="material-symbols-outlined absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 text-xl">
                 mail
               </span>
-              <input
+              <AutofillSafeInput
                 {...register('email')}
                 type="email"
-                placeholder="example@email.com"
+                placeholder={t.auth.register.emailPlaceholder}
                 autoComplete="off"
-                className="flex w-full rounded-lg text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-primary/50 border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50 h-14 placeholder:text-slate-400 pl-12 pr-4 text-base font-normal transition-all"
+                className="flex w-full rounded-lg text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-primary/50 border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50 h-12 placeholder:text-slate-400 pl-12 pr-4 text-base font-normal transition-all"
               />
             </div>
             {errors.email && <p className="text-xs text-rose-500">{errors.email.message}</p>}
@@ -179,19 +170,19 @@ export function RegisterForm(): React.JSX.Element {
 
           <div className="flex flex-col gap-2">
             <label className="text-slate-700 dark:text-slate-200 text-sm font-semibold leading-normal">
-              Password
+              {t.auth.password}
             </label>
             <div className="flex w-full items-stretch rounded-lg">
               <div className="relative flex-1">
                 <span className="material-symbols-outlined absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 text-xl">
                   lock
                 </span>
-                <input
+                <AutofillSafeInput
                   {...register('password')}
                   type={showPassword ? 'text' : 'password'}
-                  placeholder="Create a strong password"
+                  placeholder={t.auth.register.passwordPlaceholder}
                   autoComplete="new-password"
-                  className="flex w-full rounded-lg rounded-r-none border-r-0 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-primary/50 border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50 h-14 placeholder:text-slate-400 pl-12 pr-4 text-base font-normal transition-all"
+                  className="flex w-full rounded-lg rounded-r-none border-r-0 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-primary/50 border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50 h-12 placeholder:text-slate-400 pl-12 pr-4 text-base font-normal transition-all"
                 />
               </div>
               <button
@@ -221,7 +212,7 @@ export function RegisterForm(): React.JSX.Element {
                 <div className="flex items-center gap-2">
                   <span className="material-symbols-outlined text-primary text-sm">check_circle</span>
                   <p className="text-xs text-slate-500 dark:text-slate-400">
-                    Password strength:{' '}
+                    {t.auth.register.strengthPrefix}{' '}
                     <span className="text-primary font-bold">{strength.label}</span>
                   </p>
                 </div>
@@ -234,18 +225,18 @@ export function RegisterForm(): React.JSX.Element {
 
           <div className="flex flex-col gap-2">
             <label className="text-slate-700 dark:text-slate-200 text-sm font-semibold leading-normal">
-              Confirm Password
+              {t.auth.register.confirmPassword}
             </label>
             <div className="relative">
               <span className="material-symbols-outlined absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 text-xl">
                 shield
               </span>
-              <input
+              <AutofillSafeInput
                 {...register('confirmPassword')}
                 type="password"
-                placeholder="Repeat your password"
+                placeholder={t.auth.register.confirmPlaceholder}
                 autoComplete="new-password"
-                className="flex w-full rounded-lg text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-primary/50 border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50 h-14 placeholder:text-slate-400 pl-12 pr-4 text-base font-normal transition-all"
+                className="flex w-full rounded-lg text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-primary/50 border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/50 h-12 placeholder:text-slate-400 pl-12 pr-4 text-base font-normal transition-all"
               />
             </div>
             {errors.confirmPassword && (
@@ -264,13 +255,13 @@ export function RegisterForm(): React.JSX.Element {
               className="text-sm text-slate-500 dark:text-slate-400 leading-snug"
               htmlFor="terms"
             >
-              I agree to the{' '}
+              {t.auth.register.agreePrefix}{' '}
               <Link href="/terms" className="text-primary hover:underline">
-                Terms of Service
+                {t.auth.register.terms}
               </Link>{' '}
-              and{' '}
+              {t.auth.register.and}{' '}
               <Link href="/privacy" className="text-primary hover:underline">
-                Privacy Policy
+                {t.auth.register.privacy}
               </Link>
             </label>
           </div>
@@ -279,14 +270,14 @@ export function RegisterForm(): React.JSX.Element {
           <button
             type="submit"
             disabled={isSubmitting}
-            className="flex w-full cursor-pointer items-center justify-center overflow-hidden rounded-xl h-14 bg-primary text-white gap-2 text-base font-bold leading-normal tracking-wide hover:brightness-110 active:scale-[0.98] transition-all shadow-lg shadow-primary/20 disabled:opacity-60 disabled:cursor-not-allowed"
+            className="flex w-full cursor-pointer items-center justify-center overflow-hidden rounded-xl h-12 bg-primary text-white gap-2 text-base font-bold leading-normal tracking-wide hover:brightness-110 active:scale-[0.98] transition-all shadow-lg shadow-primary/20 disabled:opacity-60 disabled:cursor-not-allowed"
           >
-            {isSubmitting ? 'Creating Account...' : 'Create Account'}
+            {isSubmitting ? t.auth.register.submitting : t.auth.register.submit}
           </button>
 
           <div className="relative flex items-center py-4">
             <div className="flex-grow border-t border-slate-200 dark:border-slate-800" />
-            <span className="flex-shrink mx-4 text-slate-400 text-sm">Or register with</span>
+            <span className="flex-shrink mx-4 text-slate-400 text-sm">{t.auth.register.orRegisterWith}</span>
             <div className="flex-grow border-t border-slate-200 dark:border-slate-800" />
           </div>
 
@@ -298,24 +289,19 @@ export function RegisterForm(): React.JSX.Element {
               className="flex items-center justify-center gap-2 rounded-lg border border-slate-200 dark:border-slate-800 h-12 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
             >
               <GoogleIcon />
-              <span className="text-sm font-semibold">{googleLoading ? '...' : 'Continue with Google'}</span>
+              <span className="text-sm font-semibold">{googleLoading ? t.auth.register.googleLoading : t.auth.continueWithGoogle}</span>
             </button>
           </div>
 
           <p className="text-center text-slate-500 dark:text-slate-400 text-sm mt-4">
-            Already have an account?{' '}
+            {t.auth.register.haveAccount}{' '}
             <Link href="/login" className="text-primary font-bold hover:underline ml-1">
-              Log In
+              {t.auth.register.logIn}
             </Link>
           </p>
         </form>
 
-        <footer className="mt-auto pt-10 pb-6 text-center px-4">
-          <p className="text-slate-400 dark:text-slate-600 text-xs">
-            &copy; 2026 Track PNL Pro. All rights reserved.
-          </p>
-        </footer>
-      </div>
+      </AuthCard>
     </div>
   )
 }

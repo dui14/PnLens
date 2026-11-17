@@ -1,6 +1,13 @@
+import { generateKeyPairSync } from 'node:crypto'
 import { afterEach, beforeEach, vi } from 'vitest'
 
 const realSetTimeout = globalThis.setTimeout.bind(globalThis)
+
+const generatedRsa = generateKeyPairSync('rsa', { modulusLength: 2048 })
+export const testPrivateKeyPem = generatedRsa.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()
+
+const generatedEd25519 = generateKeyPairSync('ed25519')
+export const testEd25519PrivateKeyPem = generatedEd25519.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()
 
 export const credentials = {
   apiKey: 'test-api-key',

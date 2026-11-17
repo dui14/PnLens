@@ -1,0 +1,9 @@
+export const PNL_SNAPSHOT_COOLDOWN_MS = 2 * 60 * 1000
+export const PNL_JOB_STALE_AFTER_MS = 10 * 60 * 1000
+export const PNL_JOB_POLL_INTERVAL_MS = 2000
+export const PNL_JOB_FALLBACK_POLL_INTERVAL_MS = 15000
+export const PNL_JOB_REALTIME_EVENT = 'UPDATE'
+export const PNL_JOB_TABLE = 'pnl_calculation_jobs'
+export const PNL_JOB_POLL_MAX_WAIT_MS = PNL_JOB_STALE_AFTER_MS
+export const PNL_JOB_STALE_ERROR = 'JOB_STALE'
+export const PNL_JOB_UNIQUE_VIOLATION_CODE = '23505'

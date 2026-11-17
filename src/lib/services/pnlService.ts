@@ -1,6 +1,8 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import type {
   PNLSummary,
+  PnlSnapshotRecord,
+  SnapshotExchange,
   PNLChartPoint,
   PNLCalendarDay,
   PNLCalendarMonth,
@@ -11,13 +13,35 @@ import type {
   DashboardOverview,
   Exchange,
   AssetDistributionSummary,
+  FeeSummary,
 } from '@/lib/types'
+import { EXCHANGES } from '@/lib/types'
+import { RECENT_TRADES_PER_EXCHANGE_LIMIT } from '@/lib/config/recentTrades'
+import type { TradeCursor } from '@/lib/pagination/tradeCursor'
 import { getTradesForPNL, getTrades, getTradeTotals } from '@/lib/db/tradesDb'
+import { getExchangeAccountById } from '@/lib/db/exchangeDb'
+import { getPnlSnapshot } from '@/lib/db/pnlDb'
+import { buildFeeSummary } from '@/lib/engines/feeEngine'
+import {
+  buildAssetDistribution,
+  calculateAllTimeWinRate,
+  calculateWinRateByDays,
+  getWindowStartDate,
+  sumPnl,
+  sumPnlFromDate,
+  sumVolumeByDays,
+} from '@/lib/engines/pnlSnapshotEngine'
 import { calculatePNLSummary, buildPNLTimeSeries, buildPNLCalendarDays, buildPNLCalendarMonths, getDateRangeForPeriod } from '@/lib/engines/pnlEngine'
+import {
+  APP_UTC_OFFSET_MINUTES,
+  monthBounds,
+  rangeFor,
+  yearBounds,
+} from '@/lib/time/dayBoundary'
 
 type GetTradesOptions = {
-  page: number
   limit: number
+  cursor?: TradeCursor
   exchangeAccountId?: string
   exchange?: Exchange
   symbol?: string
@@ -27,7 +51,7 @@ type GetTradesOptions = {
 
 type TradesResult = {
   trades: Trade[]
-  total: number
+  nextCursor: string | null
 }
 
 function mapSegmentToTradeType(segment: TradeSegment): 'spot' | 'futures' | undefined {
@@ -35,138 +59,15 @@ function mapSegmentToTradeType(segment: TradeSegment): 'spot' | 'futures' | unde
   return segment
 }
 
-function getWindowStartDate(days: number): Date {
-  const now = new Date()
-  now.setHours(23, 59, 59, 999)
-  const start = new Date(now)
-  start.setDate(now.getDate() - (days - 1))
-  start.setHours(0, 0, 0, 0)
-  return start
-}
-
-function getWindowEndDate(): Date {
-  const end = new Date()
-  end.setHours(23, 59, 59, 999)
-  return end
-}
-
-function toDateKey(date: Date): string {
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  return `${year}-${month}-${day}`
-}
-
-function aggregateDailyPnl(trades: Trade[], startMs?: number): Map<string, number> {
-  const dailyPnl = new Map<string, number>()
-
-  for (const trade of trades) {
-    if (trade.realized_pnl === null) continue
-
-    const tradedMs = new Date(trade.traded_at).getTime()
-    if (startMs !== undefined && tradedMs < startMs) continue
-
-    const pnl = Number(trade.realized_pnl)
-    if (!Number.isFinite(pnl)) continue
-
-    const dateKey = toDateKey(new Date(trade.traded_at))
-    const current = dailyPnl.get(dateKey) ?? 0
-    dailyPnl.set(dateKey, current + pnl)
-  }
-
-  return dailyPnl
-}
-
-function sumPnlFromDate(trades: Trade[], startDate: Date): number {
-  const startMs = startDate.getTime()
-  const total = trades.reduce((sum, trade) => {
-    const pnl = trade.realized_pnl
-    if (pnl === null) return sum
-
-    const numericPnl = Number(pnl)
-    if (!Number.isFinite(numericPnl)) return sum
-
-    const tradedMs = new Date(trade.traded_at).getTime()
-    if (tradedMs < startMs) return sum
-    return sum + numericPnl
-  }, 0)
-
-  return parseFloat(total.toFixed(8))
-}
-
-function sumPnl(trades: Trade[]): number {
-  const total = trades.reduce((sum, trade) => {
-    if (trade.realized_pnl === null) return sum
-
-    const pnl = Number(trade.realized_pnl)
-    if (!Number.isFinite(pnl)) return sum
-    return sum + pnl
-  }, 0)
-
-  return parseFloat(total.toFixed(8))
-}
-
-function isExecutedTrade(trade: Trade): boolean {
-  return trade.quantity > 0 && trade.price > 0
-}
-
-function sumVolumeByDays(trades: Trade[], days: number): number {
-  const startDate = getWindowStartDate(days)
-  const startMs = startDate.getTime()
-
-  const total = trades.reduce((sum, trade) => {
-    if (!isExecutedTrade(trade)) return sum
-    const tradedMs = new Date(trade.traded_at).getTime()
-    if (tradedMs < startMs) return sum
-    return sum + trade.quantity * trade.price
-  }, 0)
-
-  return parseFloat(total.toFixed(8))
-}
-
-function calculateWinRateByDays(trades: Trade[], days: number): number {
-  const startDate = getWindowStartDate(days)
-  const startMs = startDate.getTime()
-  const dailyPnl = aggregateDailyPnl(trades, startMs)
-
-  let winDays = 0
-  for (let offset = 0; offset < days; offset += 1) {
-    const date = new Date(startDate)
-    date.setDate(startDate.getDate() + offset)
-    const pnl = dailyPnl.get(toDateKey(date)) ?? 0
-    if (pnl > 0) {
-      winDays += 1
-    }
-  }
-
-  return parseFloat(((winDays / days) * 100).toFixed(2))
-}
-
-function calculateAllTimeWinRate(trades: Trade[]): number {
-  const dailyPnl = aggregateDailyPnl(trades)
-  if (dailyPnl.size === 0) {
-    return 0
-  }
-
-  const winDays = Array.from(dailyPnl.values()).filter((pnl) => pnl > 0).length
-  return parseFloat(((winDays / dailyPnl.size) * 100).toFixed(2))
-}
-
-function extractBaseAssetFromSymbol(symbol: string): string | null {
-  const normalized = symbol.toUpperCase().replace(/[^A-Z0-9_]/g, '')
-  if (!normalized) return null
-
-  const head = normalized.split('_')[0]
-  const withoutContractSuffix = head.replace(/(UMCBL|DMCBL|CMCBL|USDTFUTURES|COINFUTURES|USDCFUTURES)$/g, '')
-  const quoteSuffixes = ['USDT', 'USDC', 'BUSD', 'USD', 'BTC', 'ETH']
-
-  for (const suffix of quoteSuffixes) {
-    if (withoutContractSuffix.endsWith(suffix) && withoutContractSuffix.length > suffix.length) {
-      return withoutContractSuffix.slice(0, -suffix.length)
-    }
-  }
-
-  return withoutContractSuffix || null
+async function requireOwnedAccount(
+  supabase: SupabaseClient,
+  userId: string,
+  exchangeAccountId?: string
+): Promise<Result<true>> {
+  if (!exchangeAccountId) return { success: true, data: true }
+  const account = await getExchangeAccountById(supabase, exchangeAccountId, userId)
+  if (!account) return { success: false, error: 'NOT_FOUND' }
+  return { success: true, data: true }
 }
 
 export async function fetchPNLSummary(
@@ -180,10 +81,13 @@ export async function fetchPNLSummary(
   let startDate: string | undefined
   let endDate: string | undefined
 
+  const owned = await requireOwnedAccount(supabase, userId, exchangeAccountId)
+  if (!owned.success) return owned
+
   if (range !== 'all') {
-    const dateRange = getDateRangeForPeriod(range as 'day' | 'week' | 'month' | 'year')
-    startDate = dateRange.startDate
-    endDate = dateRange.endDate
+    const dateRange = rangeFor(range, new Date(), APP_UTC_OFFSET_MINUTES)
+    startDate = dateRange.start ? dateRange.start.toISOString() : undefined
+    endDate = dateRange.end.toISOString()
   }
 
   const trades = await getTradesForPNL(supabase, userId, {
@@ -206,6 +110,9 @@ export async function fetchPNLChart(
   segment: TradeSegment = 'all',
   exchange?: Exchange
 ): Promise<Result<PNLChartPoint[]>> {
+  const owned = await requireOwnedAccount(supabase, userId, exchangeAccountId)
+  if (!owned.success) return owned
+
   const { startDate, endDate } = getDateRangeForPeriod(range)
 
   const trades = await getTradesForPNL(supabase, userId, {
@@ -225,11 +132,40 @@ export async function fetchPaginatedTrades(
   userId: string,
   options: GetTradesOptions
 ): Promise<Result<TradesResult>> {
-  const { trades, total } = await getTrades(supabase, userId, {
+  const owned = await requireOwnedAccount(supabase, userId, options.exchangeAccountId)
+  if (!owned.success) return owned
+
+  const { trades, nextCursor } = await getTrades(supabase, userId, {
     ...options,
     tradeType: mapSegmentToTradeType(options.segment ?? 'all'),
   })
-  return { success: true, data: { trades, total } }
+  return { success: true, data: { trades, nextCursor } }
+}
+
+export async function fetchRecentTradesPerExchange(
+  supabase: SupabaseClient,
+  userId: string,
+  options: Omit<GetTradesOptions, 'limit' | 'cursor'>
+): Promise<Result<Trade[]>> {
+  const owned = await requireOwnedAccount(supabase, userId, options.exchangeAccountId)
+  if (!owned.success) return owned
+
+  const exchanges = options.exchange ? [options.exchange] : EXCHANGES
+  const pages = await Promise.all(
+    exchanges.map((exchange) =>
+      getTrades(supabase, userId, {
+        ...options,
+        exchange,
+        limit: RECENT_TRADES_PER_EXCHANGE_LIMIT,
+        tradeType: mapSegmentToTradeType(options.segment ?? 'all'),
+      })
+    )
+  )
+
+  const merged = pages
+    .flatMap((page) => page.trades)
+    .sort((a, b) => Date.parse(b.traded_at) - Date.parse(a.traded_at))
+  return { success: true, data: merged }
 }
 
 export async function fetchPNLCalendar(
@@ -245,11 +181,13 @@ export async function fetchPNLCalendar(
   let endDate: string
 
   if (view === 'daily' && month) {
-    startDate = new Date(year, month - 1, 1).toISOString()
-    endDate = new Date(year, month, 0, 23, 59, 59, 999).toISOString()
+    const bounds = monthBounds(year, month, APP_UTC_OFFSET_MINUTES)
+    startDate = bounds.start.toISOString()
+    endDate = bounds.end.toISOString()
   } else {
-    startDate = new Date(year, 0, 1).toISOString()
-    endDate = new Date(year, 11, 31, 23, 59, 59, 999).toISOString()
+    const bounds = yearBounds(year, APP_UTC_OFFSET_MINUTES)
+    startDate = bounds.start.toISOString()
+    endDate = bounds.end.toISOString()
   }
 
   const trades = await getTradesForPNL(supabase, userId, {
@@ -272,8 +210,12 @@ export async function fetchDashboardOverview(
   exchange?: Exchange
 ): Promise<Result<DashboardOverview>> {
   const tradeType = mapSegmentToTradeType(segment)
-  const rangeStartYear = getWindowStartDate(365).toISOString()
-  const rangeEndIso = getWindowEndDate().toISOString()
+  const now = new Date()
+  const yearStart = rangeFor('year', now, APP_UTC_OFFSET_MINUTES).start ?? now
+  const trailingStart = getWindowStartDate(90, now)
+  const rangeStart = new Date(Math.min(yearStart.getTime(), trailingStart.getTime()))
+  const rangeStartYear = rangeStart.toISOString()
+  const rangeEndIso = now.toISOString()
 
   const [yearTrades, allTrades, totals] = await Promise.all([
     getTradesForPNL(supabase, userId, {
@@ -296,25 +238,25 @@ export async function fetchDashboardOverview(
 
   const overview: DashboardOverview = {
     pnl: {
-      today: sumPnlFromDate(yearTrades, getWindowStartDate(1)),
-      d7: sumPnlFromDate(yearTrades, getWindowStartDate(7)),
-      d30: sumPnlFromDate(yearTrades, getWindowStartDate(30)),
-      d90: sumPnlFromDate(yearTrades, getWindowStartDate(90)),
-      year: sumPnl(yearTrades),
+      today: sumPnlFromDate(yearTrades, getWindowStartDate(1, now)),
+      d7: sumPnlFromDate(yearTrades, getWindowStartDate(7, now)),
+      d30: sumPnlFromDate(yearTrades, getWindowStartDate(30, now)),
+      d90: sumPnlFromDate(yearTrades, getWindowStartDate(90, now)),
+      year: sumPnlFromDate(yearTrades, yearStart),
       all: sumPnl(allTrades),
     },
     winRate: {
-      d7: calculateWinRateByDays(yearTrades, 7),
-      d30: calculateWinRateByDays(yearTrades, 30),
-      d90: calculateWinRateByDays(yearTrades, 90),
+      d7: calculateWinRateByDays(yearTrades, 7, now),
+      d30: calculateWinRateByDays(yearTrades, 30, now),
+      d90: calculateWinRateByDays(yearTrades, 90, now),
       all: calculateAllTimeWinRate(allTrades),
     },
     totalTrades: {
       count: totals.count,
       volumeUsd: totals.volumeUsd,
-      volumeUsdD7: sumVolumeByDays(yearTrades, 7),
-      volumeUsdD30: sumVolumeByDays(yearTrades, 30),
-      volumeUsdD90: sumVolumeByDays(yearTrades, 90),
+      volumeUsdD7: sumVolumeByDays(yearTrades, 7, now),
+      volumeUsdD30: sumVolumeByDays(yearTrades, 30, now),
+      volumeUsdD90: sumVolumeByDays(yearTrades, 90, now),
       volumeUsdAll: totals.volumeUsd,
     },
   }
@@ -328,66 +270,36 @@ export async function fetchAssetDistribution(
   segment: TradeSegment = 'all',
   exchange?: Exchange
 ): Promise<Result<AssetDistributionSummary>> {
-  const tradeType = mapSegmentToTradeType(segment)
   const trades = await getTradesForPNL(supabase, userId, {
     exchange,
-    tradeType,
+    tradeType: mapSegmentToTradeType(segment),
     executedOnly: true,
   })
 
-  const buckets = new Map<string, { exchange: Exchange; asset: string; quantity: number; lastPrice: number }>()
+  return { success: true, data: buildAssetDistribution(trades) }
+}
 
-  for (const trade of trades) {
-    const tradeExchange = (trade as Trade & { exchange?: Exchange }).exchange
-    if (!tradeExchange) continue
+export async function fetchPnlSnapshot(
+  supabase: SupabaseClient,
+  userId: string,
+  segment: TradeSegment,
+  exchange: SnapshotExchange
+): Promise<Result<PnlSnapshotRecord | null>> {
+  const snapshot = await getPnlSnapshot(supabase, userId, segment, exchange)
+  return { success: true, data: snapshot }
+}
 
-    const asset = extractBaseAssetFromSymbol(trade.symbol)
-    if (!asset) continue
+export async function fetchFeeSummary(
+  supabase: SupabaseClient,
+  userId: string,
+  segment: TradeSegment = 'all',
+  exchange?: Exchange
+): Promise<Result<FeeSummary>> {
+  const trades = await getTradesForPNL(supabase, userId, {
+    exchange,
+    tradeType: mapSegmentToTradeType(segment),
+    executedOnly: true,
+  })
 
-    const signedQuantity = trade.side === 'buy' ? trade.quantity : -trade.quantity
-    const key = `${tradeExchange}:${asset}`
-    const current = buckets.get(key) ?? {
-      exchange: tradeExchange,
-      asset,
-      quantity: 0,
-      lastPrice: 0,
-    }
-
-    current.quantity += signedQuantity
-    if (Number.isFinite(trade.price) && trade.price > 0) {
-      current.lastPrice = trade.price
-    }
-
-    buckets.set(key, current)
-  }
-
-  const rows = Array.from(buckets.values())
-    .map((item) => {
-      const quantity = Math.abs(item.quantity)
-      const usdValue = quantity * item.lastPrice
-      return {
-        exchange: item.exchange,
-        asset: item.asset,
-        quantity,
-        usdValue,
-      }
-    })
-    .filter((item) => item.quantity > 0 && item.usdValue > 0)
-    .sort((a, b) => b.usdValue - a.usdValue)
-
-  const totalUsdRaw = rows.reduce((sum, item) => sum + item.usdValue, 0)
-  const totalUsd = parseFloat(totalUsdRaw.toFixed(8))
-
-  const items = rows.map((item) => ({
-    ...item,
-    ratio: totalUsdRaw > 0 ? parseFloat((item.usdValue / totalUsdRaw).toFixed(8)) : 0,
-  }))
-
-  return {
-    success: true,
-    data: {
-      totalUsd,
-      items,
-    },
-  }
+  return { success: true, data: buildFeeSummary(trades) }
 }

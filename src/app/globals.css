@@ -29,3 +29,62 @@
   background: #5f4a8c;
   border-radius: 10px;
 }
+
+@keyframes autofill-detect {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+input:-webkit-autofill {
+  animation-name: autofill-detect;
+  animation-duration: 1ms;
+}
+
+@keyframes ticker-marquee {
+  from {
+    transform: translate3d(0, 0, 0);
+  }
+  to {
+    transform: translate3d(-50%, 0, 0);
+  }
+}
+
+.ticker-marquee {
+  overflow: hidden;
+  contain: paint;
+  mask-image: linear-gradient(to right, transparent, #000 2rem, #000 calc(100% - 2rem), transparent);
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 2rem, #000 calc(100% - 2rem), transparent);
+}
+
+.ticker-marquee__track {
+  display: flex;
+  width: max-content;
+  will-change: transform;
+  animation: ticker-marquee var(--ticker-duration, 70s) linear infinite;
+}
+
+.ticker-marquee:hover .ticker-marquee__track,
+.ticker-marquee:focus-within .ticker-marquee__track {
+  animation-play-state: paused;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ticker-marquee {
+    overflow-x: auto;
+    mask-image: none;
+    -webkit-mask-image: none;
+  }
+
+  .ticker-marquee__track {
+    animation: none;
+    will-change: auto;
+  }
+
+  .ticker-marquee__copy[aria-hidden='true'] {
+    display: none;
+  }
+}

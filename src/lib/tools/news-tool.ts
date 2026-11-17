@@ -83,7 +83,7 @@ const QUERY_TOKEN_SYNONYMS: Record<string, string[]> = {
 
 const RSS_FETCH_HEADERS: HeadersInit = {
   Accept: 'application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5',
-  'User-Agent': 'aiTrackProfit-RSS/1.0 (+https://aitrackprofit.app)',
+  'User-Agent': 'PnLens-RSS/1.0 (+https://pnlens.duii.dev)',
 }
 
 const NEWS_SOURCES: NewsSource[] = CRYPTO_RSS_NEWS_FEEDS.map((source) => ({

@@ -1,5 +1,6 @@
 import { z } from 'zod'
-import { EXCHANGES, PERIOD_TYPES, TRADE_SEGMENTS } from '@/lib/types'
+import { decodeTradeCursor } from '@/lib/pagination/tradeCursor'
+import { EXCHANGES, PERIOD_TYPES, SNAPSHOT_EXCHANGES, TRADE_SEGMENTS } from '@/lib/types'
 
 export const PNLSummaryQuerySchema = z.object({
   range: z.enum(PERIOD_TYPES).default('all'),
@@ -24,8 +25,12 @@ export const PNLCalendarQuerySchema = z.object({
 })
 
 export const TradesQuerySchema = z.object({
-  page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(100).default(20),
+  cursor: z
+    .string()
+    .max(512)
+    .refine((value) => decodeTradeCursor(value) !== null)
+    .optional(),
   exchangeAccountId: z.string().uuid().optional(),
   exchange: z.enum(EXCHANGES).optional(),
   symbol: z.string().optional(),
@@ -42,9 +47,22 @@ export const AssetDistributionQuerySchema = z.object({
   segment: z.enum(TRADE_SEGMENTS).default('all'),
 })
 
+export const PnlSnapshotQuerySchema = z.object({
+  exchange: z.enum(SNAPSHOT_EXCHANGES).default('all'),
+  segment: z.enum(TRADE_SEGMENTS).default('all'),
+})
+
 export type PNLSummaryQuery = z.infer<typeof PNLSummaryQuerySchema>
 export type PNLChartQuery = z.infer<typeof PNLChartQuerySchema>
 export type PNLCalendarQuery = z.infer<typeof PNLCalendarQuerySchema>
 export type TradesQuery = z.infer<typeof TradesQuerySchema>
 export type PNLOverviewQuery = z.infer<typeof PNLOverviewQuerySchema>
+export type PnlSnapshotQuery = z.infer<typeof PnlSnapshotQuerySchema>
 export type AssetDistributionQuery = z.infer<typeof AssetDistributionQuerySchema>
+
+export const FeeSummaryQuerySchema = z.object({
+  exchange: z.enum(EXCHANGES).optional(),
+  segment: z.enum(TRADE_SEGMENTS).default('all'),
+})
+
+export type FeeSummaryQuery = z.infer<typeof FeeSummaryQuerySchema>

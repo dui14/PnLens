@@ -1,26 +1,51 @@
-import { createHmac } from 'crypto'
+import { HistoryGapTracker, type HistoryGap } from './historyGaps'
+import { keyObjectFromSecret, signAsymmetricKey } from './pemPrivateKey'
 import type {
   ExchangeAdapterTrade,
   ExchangeCredentials,
   AssetBalance,
   UnrealizedPosition,
 } from '@/lib/types'
+import { type ExchangeAdapter } from './exchangeFactory'
 import {
-  type ExchangeAdapter,
-  type CredentialValidationResult,
-} from './exchangeFactory'
+  interpretBinanceRestrictions,
+  probeFailure,
+  readJson,
+  type CredentialProbeResult,
+} from './credentialValidation'
+import { BINANCE_BASE_URL as BASE_URL, BINANCE_FUTURES_BASE_URL as FUTURES_URL } from './exchangeBases'
 import { fetchExchange } from './httpClient'
-
-const BASE_URL = 'https://api.binance.com'
-const FUTURES_URL = 'https://fapi.binance.com'
+import { throwOnServerPage } from './exchangeWindowError'
+import {
+  BINANCE_HISTORY,
+  BINANCE_SPOT_DISCOVERY,
+  DAY_MS,
+  HISTORY_RETRY,
+  SCAN_LOOKBACK_MS,
+} from '@/lib/scan/scanLimits'
+import {
+  bStockAssets,
+  expandAssetsToSymbols,
+  parseSpotCatalog,
+  windowsBetween,
+  type SpotCatalogEntry,
+} from './binanceSpotSymbols'
+import {
+  TradeRejectCounter,
+  epochMillisToIso,
+  optionalDecimal,
+  requiredDecimal,
+  type TradeRejectCounts,
+} from './tradeFields'
 const REQUEST_TIMEOUT = 10_000
 const RECV_WINDOW = 10_000
-const DEFAULT_LOOKBACK_MS = 365 * 24 * 60 * 60 * 1000
+const DEFAULT_LOOKBACK_MS = SCAN_LOOKBACK_MS
 const QUOTE_ASSETS = ['USDT', 'BUSD', 'USDC', 'BTC', 'ETH', 'BNB']
 const STABLE_ASSETS = new Set(['USDT', 'BUSD', 'USDC', 'FDUSD', 'DAI', 'TUSD'])
-const FUTURES_INCOME_CHUNK_MS = 7 * 24 * 60 * 60 * 1000
-const FUTURES_USER_TRADES_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
-const FUTURES_USER_TRADES_LOOKBACK_MS = 365 * 24 * 60 * 60 * 1000
+const FUTURES_INCOME_CHUNK_MS = BINANCE_HISTORY.incomeWindowDays * DAY_MS
+const FUTURES_USER_TRADES_WINDOW_MS = BINANCE_HISTORY.futuresWindowDays * DAY_MS
+const FUTURES_USER_TRADES_LOOKBACK_MS = BINANCE_HISTORY.futuresFillsLookbackDays * DAY_MS
+const INCOME_LOOKBACK_MS = SCAN_LOOKBACK_MS
 const FUTURES_INCOME_TYPES = ['REALIZED_PNL', 'FUNDING_FEE', 'COMMISSION'] as const
 const EARN_ASSET_PREFIXES = ['LD', 'BVOL', 'DVOL']
 const LEVERAGED_SUFFIXES = ['UP', 'DOWN', 'BEAR', 'BULL', '3L', '3S', '2L', '2S']
@@ -37,7 +62,7 @@ function isSyntheticAsset(asset: string): boolean {
 }
 
 function sign(queryString: string, secret: string): string {
-  return createHmac('sha256', secret).update(queryString).digest('hex')
+  return signAsymmetricKey('binance', queryString, keyObjectFromSecret(secret))
 }
 
 type RequestInitWithProxy = RequestInit & { proxy?: string | null }
@@ -61,14 +86,56 @@ async function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+type UrlSource = string | (() => string)
+
+function signedUrl(
+  endpoint: string,
+  fields: Record<string, string>,
+  secret: string,
+  timestampOverride?: number
+): () => string {
+  return () => {
+    const params = new URLSearchParams({
+      ...fields,
+      timestamp: String(timestampOverride ?? Date.now()),
+    })
+    params.append('signature', sign(params.toString(), secret))
+    return `${endpoint}?${params}`
+  }
+}
+
+function retryDelayMs(response: Response, attempt: number): number {
+  const header = Number(response.headers.get(BINANCE_HISTORY.retryAfterHeader))
+  if (Number.isFinite(header) && header > 0) return Math.min(header * 1000, HISTORY_RETRY.maxDelayMs)
+  return Math.min(Math.pow(2, attempt) * HISTORY_RETRY.baseDelayMs, HISTORY_RETRY.maxDelayMs)
+}
+
+async function isRateLimited(response: Response): Promise<boolean> {
+  if ((BINANCE_HISTORY.rateLimitStatuses as readonly number[]).includes(response.status)) return true
+  if (response.ok) return false
+  try {
+    const body = (await response.clone().json()) as { code?: number }
+    return body?.code === BINANCE_HISTORY.rateLimitCode
+  } catch {
+    return false
+  }
+}
+
+async function paceByUsedWeight(response: Response): Promise<void> {
+  const used = Number(response.headers.get(BINANCE_HISTORY.usedWeightHeader))
+  if (Number.isFinite(used) && used >= BINANCE_HISTORY.weightSlowdownThreshold) {
+    await sleep(BINANCE_HISTORY.weightPauseMs)
+  }
+}
+
 async function fetchWithRetry(
-  url: string,
+  url: UrlSource,
   options?: RequestInitWithProxy,
   attempt = 0,
   proxy?: string | null
 ): Promise<Response> {
   const response = await fetchWithTimeout(
-    url,
+    typeof url === 'function' ? url() : url,
     proxy
       ? ({
           ...(options ?? {}),
@@ -76,16 +143,47 @@ async function fetchWithRetry(
         } as RequestInit)
       : options
   )
-  if (response.status === 429 && attempt < 4) {
-    const backoff = Math.min(Math.pow(2, attempt) * 1000, 60_000)
-    await sleep(backoff + Math.random() * 500)
-    return fetchWithRetry(url, options, attempt + 1, proxy)
+  if (await isRateLimited(response)) {
+    if (attempt + 1 < HISTORY_RETRY.maxAttempts) {
+      await sleep(retryDelayMs(response, attempt) + Math.random() * HISTORY_RETRY.baseDelayMs)
+      return fetchWithRetry(url, options, attempt + 1, proxy)
+    }
+    return response
   }
+  await paceByUsedWeight(response)
   return response
 }
 
 export class BinanceAdapter implements ExchangeAdapter {
   private proxy: string | null = null
+  private readonly rejections = new TradeRejectCounter()
+  private readonly gaps = new HistoryGapTracker()
+
+  historyGaps(): HistoryGap[] {
+    return this.gaps.gaps
+  }
+
+  private spotResume: ((symbol: string, beforeMs: number) => Promise<number>) | null = null
+
+  setSpotResume(resolver: (symbol: string, beforeMs: number) => Promise<number>): void {
+    this.spotResume = resolver
+  }
+
+
+  private knownSpotSymbols: Set<string> | null = null
+  private discoveryStats: BinanceSpotDiscoveryStats = emptyDiscoveryStats()
+
+  setKnownSpotSymbols(symbols: string[]): void {
+    this.knownSpotSymbols = new Set(symbols)
+  }
+
+  spotDiscoveryStats(): BinanceSpotDiscoveryStats {
+    return { ...this.discoveryStats }
+  }
+
+  rejectedTradeCounts(): TradeRejectCounts {
+    return this.rejections.counts
+  }
 
   private restrictionsCache:
     | {
@@ -96,144 +194,38 @@ export class BinanceAdapter implements ExchangeAdapter {
     | null = null
 
   private async withProxy<T>(
-    credentials: ExchangeCredentials,
+    _credentials: ExchangeCredentials,
     fn: () => Promise<T>
   ): Promise<T> {
-    const previousProxy = this.proxy
-    if (typeof credentials.proxy === 'string') {
-      this.proxy = credentials.proxy.trim() || null
-    }
-
-    try {
-      return await fn()
-    } finally {
-      this.proxy = previousProxy
-    }
+    return fn()
   }
 
   private async fetchWithRetry(
-    url: string,
+    url: UrlSource,
     options?: RequestInit
   ): Promise<Response> {
     return fetchWithRetry(url, options, 0, this.proxy)
   }
 
-  async validateCredentials(credentials: ExchangeCredentials): Promise<boolean> {
-    const result = await this.validateCredentialsDetailed(credentials)
-    return result.ok
-  }
-
-  async validateCredentialsDetailed(
-    credentials: ExchangeCredentials
-  ): Promise<CredentialValidationResult> {
-    return this.withProxy(credentials, async () => {
-      try {
-        const restrictions = await this.fetchApiRestrictions(credentials)
-        if (restrictions.ok) {
-          return { ok: true, code: 'valid' }
-        }
-
-        const [spotResponse, futuresResponse] = await Promise.all([
-          this.fetchSignedAccount(credentials),
-          this.fetchSignedFuturesAccount(credentials),
-        ])
-
-        if (spotResponse.ok || futuresResponse.ok) {
-          return { ok: true, code: 'valid' }
-        }
-
-        const errors = await Promise.all([
-          this.parseBinanceError(spotResponse),
-          this.parseBinanceError(futuresResponse),
-        ])
-
-        return this.classifyBinanceValidationFailure(errors)
-      } catch {
-        return {
-          ok: false,
-          code: 'unreachable',
-          message: 'Binance validation request failed',
-        }
-      }
-    })
-  }
-
-  private classifyBinanceValidationFailure(
-    errors: Array<{ upstreamStatus: number; exchangeCode: number | null; message: string | null }>
-  ): CredentialValidationResult {
-    const regionBlocked = errors.find(
-      (error) =>
-        error.upstreamStatus === 451 ||
-        error.upstreamStatus === 403 ||
-        (error.message ?? '').toLowerCase().includes('restricted location')
-    )
-
-    if (regionBlocked) {
-      return {
-        ok: false,
-        code: 'region_blocked',
-        upstreamStatus: regionBlocked.upstreamStatus,
-        exchangeCode: regionBlocked.exchangeCode,
-        message: regionBlocked.message,
-      }
-    }
-
-    const timeDrift = errors.find((error) => error.exchangeCode === -1021)
-    if (timeDrift) {
-      return {
-        ok: false,
-        code: 'time_drift',
-        upstreamStatus: timeDrift.upstreamStatus,
-        exchangeCode: timeDrift.exchangeCode,
-        message: timeDrift.message,
-      }
-    }
-
-    const unreachable = errors.find((error) => error.upstreamStatus >= 500)
-    if (unreachable) {
-      return {
-        ok: false,
-        code: 'unreachable',
-        upstreamStatus: unreachable.upstreamStatus,
-        exchangeCode: unreachable.exchangeCode,
-        message: unreachable.message,
-      }
-    }
-
-    const first = errors[0] ?? {
-      upstreamStatus: 400,
-      exchangeCode: null,
-      message: null,
-    }
-
-    return {
-      ok: false,
-      code: 'invalid_api_key',
-      upstreamStatus: first.upstreamStatus,
-      exchangeCode: first.exchangeCode,
-      message: first.message,
-    }
-  }
-
-  private async parseBinanceError(response: Response): Promise<{
-    upstreamStatus: number
-    exchangeCode: number | null
-    message: string | null
-  }> {
-    const upstreamStatus = response.status
+  async validateCredentials(credentials: ExchangeCredentials): Promise<CredentialProbeResult> {
+    if (!credentials.apiSecret.trim()) return probeFailure('INVALID_SECRET_OR_PASSPHRASE')
     try {
-      const payload = (await response.json()) as { code?: number; msg?: string }
-      return {
-        upstreamStatus,
-        exchangeCode: typeof payload.code === 'number' ? payload.code : null,
-        message: typeof payload.msg === 'string' ? payload.msg : null,
+      const response = await fetchWithRetry(
+        signedUrl(
+          `${BASE_URL}/sapi/v1/account/apiRestrictions`,
+          { recvWindow: String(RECV_WINDOW) },
+          credentials.apiSecret
+        ),
+        { headers: { 'X-MBX-APIKEY': credentials.apiKey } },
+        0,
+        null
+      )
+      return interpretBinanceRestrictions(response.status, await readJson(response))
+    } catch (error) {
+      if (error instanceof Error && error.message === 'UNSUPPORTED_SIGNING_KEY') {
+        return probeFailure('INVALID_SECRET_OR_PASSPHRASE')
       }
-    } catch {
-      return {
-        upstreamStatus,
-        exchangeCode: null,
-        message: null,
-      }
+      return probeFailure('EXCHANGE_UNREACHABLE')
     }
   }
 
@@ -261,32 +253,6 @@ export class BinanceAdapter implements ExchangeAdapter {
       } catch {
         return false
       }
-    })
-  }
-
-  private async fetchSignedAccount(credentials: ExchangeCredentials): Promise<Response> {
-    const timestamp = Date.now()
-    const params = new URLSearchParams({
-      timestamp: String(timestamp),
-      recvWindow: String(RECV_WINDOW),
-    })
-    params.append('signature', sign(params.toString(), credentials.apiSecret))
-
-    return this.fetchWithRetry(`${BASE_URL}/api/v3/account?${params.toString()}`, {
-      headers: { 'X-MBX-APIKEY': credentials.apiKey },
-    })
-  }
-
-  private async fetchSignedFuturesAccount(credentials: ExchangeCredentials): Promise<Response> {
-    const timestamp = Date.now()
-    const params = new URLSearchParams({
-      timestamp: String(timestamp),
-      recvWindow: String(RECV_WINDOW),
-    })
-    params.append('signature', sign(params.toString(), credentials.apiSecret))
-
-    return this.fetchWithRetry(`${FUTURES_URL}/fapi/v2/account?${params.toString()}`, {
-      headers: { 'X-MBX-APIKEY': credentials.apiKey },
     })
   }
 
@@ -338,15 +304,13 @@ export class BinanceAdapter implements ExchangeAdapter {
     timestampOverride?: number
   ): Promise<{ ok: boolean; data?: BinanceApiRestrictions; errorCode?: number }> {
     try {
-      const timestamp = timestampOverride ?? Date.now()
-      const params = new URLSearchParams({
-        timestamp: String(timestamp),
-        recvWindow: String(RECV_WINDOW),
-      })
-      params.append('signature', sign(params.toString(), credentials.apiSecret))
-
       const response = await this.fetchWithRetry(
-        `${BASE_URL}/sapi/v1/account/apiRestrictions?${params.toString()}`,
+        signedUrl(
+          `${BASE_URL}/sapi/v1/account/apiRestrictions`,
+          { recvWindow: String(RECV_WINDOW) },
+          credentials.apiSecret,
+          timestampOverride
+        ),
         { headers: { 'X-MBX-APIKEY': credentials.apiKey } }
       )
 
@@ -373,10 +337,16 @@ export class BinanceAdapter implements ExchangeAdapter {
     }
   }
 
+  private scanEndMs = 0
+
   async fetchTrades(
     credentials: ExchangeCredentials,
-    since?: Date
+    since?: Date,
+    until?: Date
   ): Promise<ExchangeAdapterTrade[]> {
+    this.scanEndMs = until?.getTime() ?? Date.now()
+    this.rejections.reset()
+    this.gaps.reset()
     return this.withProxy(credentials, async () => {
       const [spotTrades, futuresTrades] = await Promise.all([
         this.fetchSpotTrades(credentials.apiKey, credentials.apiSecret, since),
@@ -392,30 +362,173 @@ export class BinanceAdapter implements ExchangeAdapter {
     since?: Date
   ): Promise<ExchangeAdapterTrade[]> {
     const startTime = since ? since.getTime() : Date.now() - DEFAULT_LOOKBACK_MS
+    const symbolsToQuery = await this.resolveSpotSymbols(apiKey, apiSecret, startTime)
+
+    const allTrades: ExchangeAdapterTrade[] = []
+    const queue = [...symbolsToQuery]
+    let failure: unknown = null
+    const worker = async (): Promise<void> => {
+      while (failure === null) {
+        const symbol = queue.shift()
+        if (symbol === undefined) return
+        await sleep(BINANCE_SPOT_DISCOVERY.requestPauseMs)
+        try {
+          allTrades.push(...(await this.fetchSpotTradesForSymbol(apiKey, apiSecret, symbol, startTime)))
+        } catch (error) {
+          failure = error
+        }
+      }
+    }
+    await Promise.all(Array.from({ length: BINANCE_SPOT_DISCOVERY.concurrency }, () => worker()))
+    if (failure !== null) throw failure
+    return this.deduplicateFuturesTrades(allTrades)
+  }
+
+  private async resolveSpotSymbols(apiKey: string, apiSecret: string, startTime: number): Promise<string[]> {
+    const stats = emptyDiscoveryStats()
+    const symbols = new Set<string>()
+    const take = (candidates: Iterable<string>): number => {
+      const before = symbols.size
+      for (const symbol of candidates) symbols.add(symbol)
+      return symbols.size - before
+    }
+
+    const catalog = await this.fetchSpotCatalog(startTime)
+    stats.known = take(this.knownSpotSymbols ?? [])
 
     const balances = await this.fetchBalances({ apiKey, apiSecret })
-    const tradableAssets = balances.map((item) => item.asset).filter(
-      (a) => !STABLE_ASSETS.has(a) && !isSyntheticAsset(a)
+    const balanceCandidates = new Set<string>()
+    for (const asset of this.tradableOnly(balances.map((item) => item.asset))) {
+      for (const quote of QUOTE_ASSETS) {
+        if (asset !== quote) balanceCandidates.add(`${asset}${quote}`)
+      }
+    }
+    for (const base of COMMON_BASE_ASSETS) balanceCandidates.add(`${base}USDT`)
+    const listed = catalog ? new Set(catalog.map((entry) => entry.symbol)) : null
+    stats.balances = take(Array.from(balanceCandidates).filter((symbol) => listed === null || listed.has(symbol)))
+
+    const historyAssets = await this.fetchHistoryAssets(apiKey, apiSecret, startTime)
+    stats.historyAssets = historyAssets.size
+    stats.history = take(
+      expandAssetsToSymbols(this.tradableOnly(historyAssets), catalog, BINANCE_SPOT_DISCOVERY.quoteAssets)
     )
 
-    const symbolsToQuery = new Set<string>()
-    for (const asset of tradableAssets) {
-      for (const quote of QUOTE_ASSETS) {
-        if (asset !== quote) symbolsToQuery.add(`${asset}${quote}`)
+    if (this.knownSpotSymbols !== null && this.knownSpotSymbols.size === 0) {
+      const stocks = await this.fetchBStockAssets(apiKey, apiSecret)
+      stats.bStock = take(
+        expandAssetsToSymbols(this.tradableOnly(stocks), catalog, BINANCE_SPOT_DISCOVERY.quoteAssets)
+      )
+    }
+
+    stats.total = symbols.size
+    this.discoveryStats = stats
+    return Array.from(symbols)
+  }
+
+  private tradableOnly(assets: Iterable<string>): string[] {
+    return Array.from(assets).filter((asset) => !STABLE_ASSETS.has(asset) && !isSyntheticAsset(asset))
+  }
+
+  private async fetchSpotCatalog(startTime: number): Promise<SpotCatalogEntry[] | null> {
+    let catalog: SpotCatalogEntry[] | null = null
+    try {
+      const response = await this.fetchWithRetry(`${BASE_URL}/api/v3/exchangeInfo?showPermissionSets=false`)
+      if (response.ok) catalog = parseSpotCatalog(await response.json())
+    } catch {
+      catalog = null
+    }
+    if (!catalog) this.gaps.record(BINANCE_SPOT_DISCOVERY.gapMarket, startTime, this.scanEndMs)
+    return catalog
+  }
+
+  private async fetchBStockAssets(apiKey: string, apiSecret: string): Promise<string[]> {
+    const body = await this.fetchSignedJson(apiKey, apiSecret, '/sapi/v1/capital/config/getall', {})
+    if (body === null) {
+      return []
+    }
+    return bStockAssets(body, BINANCE_SPOT_DISCOVERY.bStockNamePattern)
+  }
+
+  private async fetchSignedJson(
+    apiKey: string,
+    apiSecret: string,
+    endpoint: string,
+    fields: Record<string, string>
+  ): Promise<unknown | null> {
+    try {
+      const response = await this.fetchWithRetry(
+        signedUrl(`${BASE_URL}${endpoint}`, { ...fields, recvWindow: String(RECV_WINDOW) }, apiSecret),
+        { headers: { 'X-MBX-APIKEY': apiKey } }
+      )
+      if (!response.ok) return null
+      return await response.json()
+    } catch {
+      return null
+    }
+  }
+
+  private async fetchHistoryAssets(apiKey: string, apiSecret: string, startTime: number): Promise<Set<string>> {
+    const assets = new Set<string>()
+    const endTime = this.scanEndMs
+    const limit = BINANCE_SPOT_DISCOVERY.historyPageSize
+    const pause = BINANCE_SPOT_DISCOVERY.historyPauseMs
+
+    for (const endpoint of ['/sapi/v1/capital/deposit/hisrec', '/sapi/v1/capital/withdraw/history']) {
+      const windowMs = BINANCE_SPOT_DISCOVERY.depositWithdrawWindowDays * DAY_MS
+      for (const window of windowsBetween(startTime, endTime, windowMs)) {
+        for (let page = 0; page < BINANCE_SPOT_DISCOVERY.historyMaxPages; page += 1) {
+          await sleep(pause)
+          const body = await this.fetchSignedJson(apiKey, apiSecret, endpoint, {
+            startTime: String(window.start),
+            endTime: String(window.end),
+            limit: String(limit),
+            offset: String(page * limit),
+          })
+          if (!Array.isArray(body)) {
+            break
+          }
+          for (const row of body as { coin?: unknown }[]) {
+            if (typeof row?.coin === 'string' && row.coin.length > 0) assets.add(row.coin)
+          }
+          if (body.length < limit) break
+        }
       }
     }
 
-    for (const base of COMMON_BASE_ASSETS) {
-      symbolsToQuery.add(`${base}USDT`)
+    for (const window of windowsBetween(startTime, endTime, BINANCE_SPOT_DISCOVERY.convertWindowDays * DAY_MS)) {
+      await sleep(pause)
+      const body = (await this.fetchSignedJson(apiKey, apiSecret, '/sapi/v1/convert/tradeFlow', {
+        startTime: String(window.start),
+        endTime: String(window.end),
+        limit: String(limit),
+      })) as { list?: unknown; moreData?: unknown } | null
+      if (!body || !Array.isArray(body.list)) {
+        continue
+      }
+      for (const row of body.list as { fromAsset?: unknown; toAsset?: unknown }[]) {
+        for (const asset of [row?.fromAsset, row?.toAsset]) {
+          if (typeof asset === 'string' && asset.length > 0) assets.add(asset)
+        }
+      }
     }
 
-    const allTrades: ExchangeAdapterTrade[] = []
-    for (const symbol of symbolsToQuery) {
-      await sleep(80)
-      const trades = await this.fetchSpotTradesForSymbol(apiKey, apiSecret, symbol, startTime)
-      allTrades.push(...trades)
+    for (const window of windowsBetween(startTime, endTime, BINANCE_SPOT_DISCOVERY.dustWindowDays * DAY_MS)) {
+      await sleep(pause)
+      const body = (await this.fetchSignedJson(apiKey, apiSecret, '/sapi/v1/asset/dribblet', {
+        startTime: String(window.start),
+        endTime: String(window.end),
+      })) as { userAssetDribblets?: unknown } | null
+      if (!body || !Array.isArray(body.userAssetDribblets)) {
+        continue
+      }
+      for (const group of body.userAssetDribblets as { userAssetDribbletDetails?: unknown }[]) {
+        const details = Array.isArray(group?.userAssetDribbletDetails) ? group.userAssetDribbletDetails : []
+        for (const detail of details as { fromAsset?: unknown }[]) {
+          if (typeof detail?.fromAsset === 'string' && detail.fromAsset.length > 0) assets.add(detail.fromAsset)
+        }
+      }
     }
-    return allTrades
+    return assets
   }
 
   private async fetchSpotTradesForSymbol(
@@ -424,28 +537,45 @@ export class BinanceAdapter implements ExchangeAdapter {
     symbol: string,
     startTime: number
   ): Promise<ExchangeAdapterTrade[]> {
-    const timestamp = Date.now()
-    const params = new URLSearchParams({
-      symbol,
-      limit: '1000',
-      startTime: String(startTime),
-      timestamp: String(timestamp),
-    })
-    params.append('signature', sign(params.toString(), apiSecret))
+    const trades: ExchangeAdapterTrade[] = []
+    let fromId = this.spotResume ? await this.spotResume(symbol, startTime) : 0
 
-    const response = await this.fetchWithRetry(`${BASE_URL}/api/v3/myTrades?${params}`, {
-      headers: { 'X-MBX-APIKEY': apiKey },
-    })
+    for (let page = 0; page < BINANCE_HISTORY.maxSpotPages; page += 1) {
+      this.discoveryStats.myTradesCalls += 1
+      const response = await this.fetchWithRetry(
+        signedUrl(
+          `${BASE_URL}/api/v3/myTrades`,
+          { symbol, limit: String(BINANCE_HISTORY.spotPageSize), fromId: String(fromId) },
+          apiSecret
+        ),
+        { headers: { 'X-MBX-APIKEY': apiKey } }
+      )
 
-    if (!response.ok) {
-      const err = (await response.json()) as { code?: number }
-      if (err?.code === -1121) return []
-      console.error(`[BinanceAdapter] fetchSpotTradesForSymbol failed for ${symbol}:`, err)
-      return []
+      if (!response.ok) {
+        throwOnServerPage(response)
+        const err = (await response.json()) as { code?: number }
+        if (err?.code === -1121) return trades
+        console.error(`[BinanceAdapter] fetchSpotTradesForSymbol failed for ${symbol}:`, err)
+        this.gaps.record('spot', startTime, this.scanEndMs)
+        return trades
+      }
+
+      const data = (await response.json()) as BinanceSpotTrade[]
+      if (!Array.isArray(data) || data.length === 0) break
+
+      let lastId = fromId
+      for (const row of data) {
+        lastId = Math.max(lastId, Number(row.id))
+        if (row.time < startTime) continue
+        const normalized = this.normalizeSpotTrade(row)
+        if (normalized) trades.push(normalized)
+      }
+
+      if (data.length < BINANCE_HISTORY.spotPageSize || lastId < fromId) break
+      fromId = lastId + 1
+      await sleep(BINANCE_SPOT_DISCOVERY.requestPauseMs)
     }
-
-    const data = (await response.json()) as BinanceSpotTrade[]
-    return data.map((t) => this.normalizeSpotTrade(t))
+    return trades
   }
 
   private async fetchFuturesTrades(
@@ -458,32 +588,30 @@ export class BinanceAdapter implements ExchangeAdapter {
     const recentTrades = await this.fetchRecentFuturesTrades(apiKey, apiSecret, fallbackSymbols)
     let primaryTrades = this.deduplicateFuturesTrades(recentTrades)
 
-    if (primaryTrades.length === 0) {
-      const historicalTrades = await this.fetchHistoricalFuturesTrades(
-        apiKey,
-        apiSecret,
-        fallbackSymbols,
-        startTime
-      )
-      primaryTrades = this.deduplicateFuturesTrades(historicalTrades)
-    }
-
     const incomeRecords = await this.fetchFuturesIncome(apiKey, apiSecret, startTime)
-
-    if (primaryTrades.length === 0) {
-      const incomeSymbols = Array.from(
-        new Set(
-          incomeRecords
-            .map((record) => String(record.symbol ?? '').trim().toUpperCase())
-            .filter((symbol) => symbol.length > 0)
-        )
+    const incomeSymbols = Array.from(
+      new Set(
+        incomeRecords
+          .map((record) => String(record.symbol ?? '').trim().toUpperCase())
+          .filter((symbol) => symbol.length > 0)
       )
+    )
 
-      if (incomeSymbols.length > 0) {
-        const recoveredRecentTrades = await this.fetchRecentFuturesTrades(apiKey, apiSecret, incomeSymbols)
-        primaryTrades = this.deduplicateFuturesTrades(recoveredRecentTrades)
-      }
+    if (primaryTrades.length === 0 && incomeSymbols.length > 0) {
+      const recoveredRecentTrades = await this.fetchRecentFuturesTrades(apiKey, apiSecret, incomeSymbols)
+      primaryTrades = this.deduplicateFuturesTrades(recoveredRecentTrades)
     }
+
+    const activeSymbols = new Set<string>(incomeSymbols)
+    for (const trade of primaryTrades) activeSymbols.add(trade.symbol.toUpperCase())
+    const historySymbols = activeSymbols.size > 0 ? Array.from(activeSymbols) : fallbackSymbols
+    const historicalTrades = await this.fetchHistoricalFuturesTrades(
+      apiKey,
+      apiSecret,
+      historySymbols,
+      startTime
+    )
+    primaryTrades = this.deduplicateFuturesTrades([...primaryTrades, ...historicalTrades])
 
     const supplementalIncomeTrades = this.normalizeSupplementalFuturesIncome(incomeRecords, primaryTrades)
 
@@ -589,7 +717,10 @@ export class BinanceAdapter implements ExchangeAdapter {
 
         return true
       })
-      .map((record) => this.normalizeFuturesIncome(record))
+      .flatMap((record) => {
+        const normalized = this.normalizeFuturesIncome(record)
+        return normalized ? [normalized] : []
+      })
   }
 
   private async fetchFuturesIncome(
@@ -599,8 +730,8 @@ export class BinanceAdapter implements ExchangeAdapter {
   ): Promise<BinanceFuturesIncome[]> {
     const allRecords: BinanceFuturesIncome[] = []
     const dedup = new Set<string>()
-    const now = Date.now()
-    let currentStart = Math.max(startTime, now - FUTURES_USER_TRADES_LOOKBACK_MS)
+    const now = this.scanEndMs
+    let currentStart = Math.max(startTime, now - INCOME_LOOKBACK_MS)
 
     while (currentStart < now) {
       const endTime = Math.min(currentStart + FUTURES_INCOME_CHUNK_MS, now)
@@ -610,21 +741,18 @@ export class BinanceAdapter implements ExchangeAdapter {
         let pageStart = currentStart
 
         while (pageStart <= endTime) {
-          const timestamp = Date.now()
-          const params = new URLSearchParams({
-            incomeType,
-            startTime: String(pageStart),
-            endTime: String(endTime),
-            limit: '1000',
-            timestamp: String(timestamp),
-          })
-          params.append('signature', sign(params.toString(), apiSecret))
-
-          const response = await this.fetchWithRetry(`${FUTURES_URL}/fapi/v1/income?${params}`, {
-            headers: { 'X-MBX-APIKEY': apiKey },
-          })
+          const response = await this.fetchWithRetry(
+            signedUrl(
+              `${FUTURES_URL}/fapi/v1/income`,
+              { incomeType, startTime: String(pageStart), endTime: String(endTime), limit: '1000' },
+              apiSecret
+            ),
+            { headers: { 'X-MBX-APIKEY': apiKey } }
+          )
 
           if (!response.ok) {
+            throwOnServerPage(response)
+            this.gaps.record('futures_income', pageStart, endTime)
             pageStart = endTime + 1
             continue
           }
@@ -647,7 +775,7 @@ export class BinanceAdapter implements ExchangeAdapter {
 
           maxSeenTime = Math.max(maxSeenTime, pageMaxTime)
 
-          if (data.length < 1000) {
+          if (data.length < 1000 || pageMaxTime + 1 <= pageStart) {
             pageStart = endTime + 1
           } else {
             pageStart = pageMaxTime + 1
@@ -672,30 +800,27 @@ export class BinanceAdapter implements ExchangeAdapter {
     startTime: number
   ): Promise<ExchangeAdapterTrade[]> {
     const allTrades: BinanceFuturesTrade[] = []
-    const now = Date.now()
+    const now = this.scanEndMs
     let windowStart = Math.max(startTime, now - FUTURES_USER_TRADES_LOOKBACK_MS)
 
     while (windowStart < now) {
       const windowEnd = Math.min(windowStart + FUTURES_USER_TRADES_WINDOW_MS - 1, now)
-      const timestamp = Date.now()
-      const params = new URLSearchParams({
-        symbol,
-        limit: '1000',
-        startTime: String(windowStart),
-        endTime: String(windowEnd),
-        timestamp: String(timestamp),
-      })
-      params.append('signature', sign(params.toString(), apiSecret))
-
-      const response = await this.fetchWithRetry(`${FUTURES_URL}/fapi/v1/userTrades?${params}`, {
-        headers: { 'X-MBX-APIKEY': apiKey },
-      })
+      const response = await this.fetchWithRetry(
+        signedUrl(
+          `${FUTURES_URL}/fapi/v1/userTrades`,
+          { symbol, limit: '1000', startTime: String(windowStart), endTime: String(windowEnd) },
+          apiSecret
+        ),
+        { headers: { 'X-MBX-APIKEY': apiKey } }
+      )
 
       if (!response.ok) {
+        throwOnServerPage(response)
         const err = (await response.json()) as { code?: number }
         if (err?.code === -1121) return []
         if (err?.code === -4061) return []
         console.error(`[BinanceAdapter] fetchFuturesTradesForSymbol failed for ${symbol}:`, err)
+        this.gaps.record('futures', windowStart, windowEnd)
         windowStart = windowEnd + 1
         continue
       }
@@ -709,9 +834,12 @@ export class BinanceAdapter implements ExchangeAdapter {
       await sleep(80)
     }
 
-    return allTrades
-      .sort((a, b) => a.time - b.time)
-      .map((t) => this.normalizeFuturesTrade(t))
+    const trades: ExchangeAdapterTrade[] = []
+    for (const row of allTrades.sort((a, b) => a.time - b.time)) {
+      const normalized = this.normalizeFuturesTrade(row)
+      if (normalized) trades.push(normalized)
+    }
+    return trades
   }
 
   private async fetchRecentFuturesTradesForSymbol(
@@ -719,22 +847,17 @@ export class BinanceAdapter implements ExchangeAdapter {
     apiSecret: string,
     symbol: string
   ): Promise<ExchangeAdapterTrade[]> {
-    const timestamp = Date.now()
-    const params = new URLSearchParams({
-      symbol,
-      limit: '1000',
-      timestamp: String(timestamp),
-    })
-    params.append('signature', sign(params.toString(), apiSecret))
-
-    const response = await this.fetchWithRetry(`${FUTURES_URL}/fapi/v1/userTrades?${params}`, {
-      headers: { 'X-MBX-APIKEY': apiKey },
-    })
+    const response = await this.fetchWithRetry(
+      signedUrl(`${FUTURES_URL}/fapi/v1/userTrades`, { symbol, limit: '1000' }, apiSecret),
+      { headers: { 'X-MBX-APIKEY': apiKey } }
+    )
 
     if (!response.ok) {
+      throwOnServerPage(response)
       const err = (await response.json()) as { code?: number }
       if (err?.code === -1121) return []
       if (err?.code === -4061) return []
+      this.gaps.record('futures', this.scanEndMs - FUTURES_USER_TRADES_WINDOW_MS, this.scanEndMs)
       return []
     }
 
@@ -743,73 +866,100 @@ export class BinanceAdapter implements ExchangeAdapter {
       return []
     }
 
-    return data
-      .sort((a, b) => a.time - b.time)
-      .map((trade) => this.normalizeFuturesTrade(trade))
+    const trades: ExchangeAdapterTrade[] = []
+    for (const row of data.sort((a, b) => a.time - b.time)) {
+      const normalized = this.normalizeFuturesTrade(row)
+      if (normalized) trades.push(normalized)
+    }
+    return trades
   }
 
-  private normalizeSpotTrade(t: BinanceSpotTrade): ExchangeAdapterTrade {
+  private normalizeSpotTrade(t: BinanceSpotTrade): ExchangeAdapterTrade | null {
+    const tradedAt = epochMillisToIso(t.time)
+    if (!tradedAt) return this.rejections.reject('INVALID_TIMESTAMP')
+    const quantity = requiredDecimal(t.qty, this.rejections)
+    if (!quantity) return null
+    const price = requiredDecimal(t.price, this.rejections)
+    if (!price) return null
+    const fee = requiredDecimal(t.commission, this.rejections)
+    if (!fee) return null
+    const id = String(t.id ?? '').trim()
+    if (!id) return this.rejections.reject('MISSING_ID')
     return {
-      external_trade_id: `spot_${t.id}`,
+      external_trade_id: `spot_${id}`,
       symbol: t.symbol,
       side: t.isBuyer ? 'buy' : 'sell',
-      quantity: parseFloat(t.qty),
-      price: parseFloat(t.price),
-      fee: parseFloat(t.commission),
+      quantity,
+      price,
+      fee,
       fee_currency: t.commissionAsset,
       realized_pnl: null,
       trade_type: 'spot',
-      traded_at: new Date(t.time).toISOString(),
+      traded_at: tradedAt,
       raw_data: t as unknown as Record<string, unknown>,
     }
   }
 
-  private normalizeFuturesTrade(t: BinanceFuturesTrade): ExchangeAdapterTrade {
+  private normalizeFuturesTrade(t: BinanceFuturesTrade): ExchangeAdapterTrade | null {
+    const tradedAt = epochMillisToIso(t.time)
+    if (!tradedAt) return this.rejections.reject('INVALID_TIMESTAMP')
+    const quantity = requiredDecimal(t.qty, this.rejections)
+    if (!quantity) return null
+    const price = requiredDecimal(t.price, this.rejections)
+    if (!price) return null
+    const fee = requiredDecimal(t.commission, this.rejections)
+    if (!fee) return null
+    const realizedPnl = optionalDecimal(t.realizedPnl, this.rejections)
+    if (realizedPnl === undefined) return null
+    const id = String(t.id ?? '').trim()
+    if (!id) return this.rejections.reject('MISSING_ID')
+    const side = t.side.toLowerCase() === 'sell' ? 'sell' : 'buy'
     return {
-      external_trade_id: `futures_${t.id}`,
+      external_trade_id: `futures_${id}`,
       symbol: t.symbol,
-      side: t.side.toLowerCase() as 'buy' | 'sell',
-      quantity: parseFloat(t.qty),
-      price: parseFloat(t.price),
-      fee: parseFloat(t.commission),
+      side,
+      quantity,
+      price,
+      fee,
       fee_currency: t.commissionAsset,
-      realized_pnl: parseFloat(t.realizedPnl),
+      realized_pnl: realizedPnl,
       trade_type: 'futures',
-      traded_at: new Date(t.time).toISOString(),
+      traded_at: tradedAt,
       raw_data: t as unknown as Record<string, unknown>,
     }
   }
 
-  private normalizeFuturesIncome(r: BinanceFuturesIncome): ExchangeAdapterTrade {
-    const incomeValue = parseFloat(r.income)
-    const fundingFee = r.incomeType === 'FUNDING_FEE' ? incomeValue : 0
+  private normalizeFuturesIncome(r: BinanceFuturesIncome): ExchangeAdapterTrade | null {
+    const tradedAt = epochMillisToIso(r.time)
+    if (!tradedAt) return this.rejections.reject('INVALID_TIMESTAMP')
+    const incomeValue = requiredDecimal(r.income, this.rejections)
+    if (!incomeValue) return null
     const incomeType = String(r.incomeType ?? '').trim().toLowerCase() || 'unknown'
     const tradeId = String(r.tradeId ?? '').trim() || 'na'
+    const tranId = String(r.tranId ?? '').trim()
+    if (!tranId) return this.rejections.reject('MISSING_ID')
+    const negative = incomeValue.startsWith('-') && !/^-0(\.0+)?$/.test(incomeValue)
     return {
-      external_trade_id: `futures_income_${incomeType}_${r.tranId}_${r.time}_${tradeId}`,
+      external_trade_id: `futures_income_${incomeType}_${tranId}_${r.time}_${tradeId}`,
       symbol: r.symbol,
-      side: incomeValue >= 0 ? 'sell' : 'buy',
-      quantity: 0,
-      price: 0,
-      fee: 0,
+      side: negative ? 'buy' : 'sell',
+      quantity: '0',
+      price: '0',
+      fee: '0',
       fee_currency: r.asset,
       realized_pnl: incomeValue,
-      funding_fee: fundingFee,
+      funding_fee: r.incomeType === 'FUNDING_FEE' ? incomeValue : '0',
       income_type: r.incomeType,
       trade_type: 'futures',
-      traded_at: new Date(r.time).toISOString(),
+      traded_at: tradedAt,
       raw_data: r as unknown as Record<string, unknown>,
     }
   }
 
   async fetchOpenPositions(credentials: ExchangeCredentials): Promise<UnrealizedPosition[]> {
     return this.withProxy(credentials, async () => {
-      const timestamp = Date.now()
-      const queryString = `timestamp=${timestamp}`
-      const signature = sign(queryString, credentials.apiSecret)
-
       const response = await this.fetchWithRetry(
-        `${FUTURES_URL}/fapi/v2/positionRisk?${queryString}&signature=${signature}`,
+        signedUrl(`${FUTURES_URL}/fapi/v2/positionRisk`, {}, credentials.apiSecret),
         { headers: { 'X-MBX-APIKEY': credentials.apiKey } }
       )
 
@@ -833,12 +983,8 @@ export class BinanceAdapter implements ExchangeAdapter {
 
   async fetchBalances(credentials: ExchangeCredentials): Promise<AssetBalance[]> {
     return this.withProxy(credentials, async () => {
-      const timestamp = Date.now()
-      const queryString = `timestamp=${timestamp}`
-      const signature = sign(queryString, credentials.apiSecret)
-
       const response = await this.fetchWithRetry(
-        `${BASE_URL}/api/v3/account?${queryString}&signature=${signature}`,
+        signedUrl(`${BASE_URL}/api/v3/account`, {}, credentials.apiSecret),
         { headers: { 'X-MBX-APIKEY': credentials.apiKey } }
       )
 
@@ -884,6 +1030,20 @@ export class BinanceAdapter implements ExchangeAdapter {
       return 0
     }
   }
+}
+
+export type BinanceSpotDiscoveryStats = {
+  known: number
+  balances: number
+  history: number
+  historyAssets: number
+  bStock: number
+  total: number
+  myTradesCalls: number
+}
+
+function emptyDiscoveryStats(): BinanceSpotDiscoveryStats {
+  return { known: 0, balances: 0, history: 0, historyAssets: 0, bStock: 0, total: 0, myTradesCalls: 0 }
 }
 
 type BinanceSpotTrade = {

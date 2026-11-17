@@ -1,4 +1,5 @@
-import { createHmac } from 'crypto'
+import { HistoryGapTracker, type HistoryGap } from './historyGaps'
+import { keyObjectFromSecret, signAsymmetricKey } from './pemPrivateKey'
 import type {
   ExchangeAdapterTrade,
   ExchangeCredentials,
@@ -6,23 +7,73 @@ import type {
   UnrealizedPosition,
 } from '@/lib/types'
 import type { ExchangeAdapter } from './exchangeFactory'
+import {
+  interpretBitgetApiKeyInfo,
+  probeFailure,
+  readJson,
+  type CredentialProbeResult,
+} from './credentialValidation'
 
-const BASE_URL = 'https://api.bitget.com'
+import { BITGET_BASE_URL as BASE_URL } from './exchangeBases'
+import { DAY_MS, EXCHANGE_SCAN_LIMITS, SCAN_LOOKBACK_MS } from '@/lib/scan/scanLimits'
+import { fetchExchange } from './httpClient'
+import { throwOnServerPage } from './exchangeWindowError'
+import {
+  TradeRejectCounter,
+  addDecimals,
+  decimalOrZero,
+  optionalDecimal,
+  requiredDecimal,
+  type TradeRejectCounts,
+} from './tradeFields'
 const REQUEST_TIMEOUT = 10_000
-const DEFAULT_LOOKBACK_MS = 365 * 24 * 60 * 60 * 1000
-const BITGET_FUTURES_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
-const BITGET_HISTORY_POSITION_LOOKBACK_MS = 90 * 24 * 60 * 60 * 1000
+const DEFAULT_LOOKBACK_MS = SCAN_LOOKBACK_MS
+const BITGET_FUTURES_WINDOW_MS = 7 * DAY_MS
+const BITGET_HISTORY_LOOKBACK_MS = EXCHANGE_SCAN_LIMITS.bitget.maxLookbackDays * DAY_MS
+
+function parseBitgetCTime(cTime: unknown): string | null {
+  if (typeof cTime !== 'string' || !/^\d+$/.test(cTime)) return null
+  if (cTime.length === 10) return new Date(Number(cTime) * 1000).toISOString()
+  if (cTime.length === 13) return new Date(Number(cTime)).toISOString()
+  return null
+}
 
 function sign(timestamp: string, method: string, requestPath: string, body: string, secret: string): string {
   const message = `${timestamp}${method.toUpperCase()}${requestPath}${body}`
-  return createHmac('sha256', secret).update(message).digest('base64')
+  return signAsymmetricKey('bitget', message, keyObjectFromSecret(secret))
+}
+
+function bitgetAccountInfoBody(body: unknown): unknown {
+  if (!body || typeof body !== 'object') return body
+  const record = body as Record<string, unknown>
+  const data = record.data
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return body
+  const row = data as Record<string, unknown>
+  if (typeof row.permType !== 'string') return body
+  const permissions = Array.isArray(row.permissions)
+    ? row.permissions.filter((token): token is string => typeof token === 'string')
+    : []
+  const authorities = [...permissions]
+  if (row.permType === 'read-only') authorities.push('readonly')
+  if (row.permType === 'read-and-write') authorities.push('trade')
+  const ipList = typeof row.ips === 'string'
+    ? row.ips.split(',').map((token) => token.trim()).filter((token) => token.length > 0)
+    : []
+  return {
+    ...record,
+    data: {
+      authorities,
+      status: 'normal',
+      ipList,
+    },
+  }
 }
 
 async function fetchWithTimeout(url: string, options?: RequestInit): Promise<Response> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT)
   try {
-    return await fetch(url, { ...options, signal: controller.signal })
+    return await fetchExchange(url, { ...options, signal: controller.signal })
   } finally {
     clearTimeout(timer)
   }
@@ -32,8 +83,14 @@ async function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-async function fetchWithRetry(url: string, options?: RequestInit, attempt = 0): Promise<Response> {
-  const response = await fetchWithTimeout(url, options)
+type RequestSource = RequestInit | (() => RequestInit)
+
+function resolveRequest(source?: RequestSource): RequestInit | undefined {
+  return typeof source === 'function' ? source() : source
+}
+
+async function fetchWithRetry(url: string, options?: RequestSource, attempt = 0): Promise<Response> {
+  const response = await fetchWithTimeout(url, resolveRequest(options))
   if (response.status === 429 && attempt < 4) {
     const backoff = Math.min(Math.pow(2, attempt) * 1000, 60_000)
     await sleep(backoff + Math.random() * 500)
@@ -43,6 +100,18 @@ async function fetchWithRetry(url: string, options?: RequestInit, attempt = 0): 
 }
 
 export class BitgetAdapter implements ExchangeAdapter {
+  private readonly rejections = new TradeRejectCounter()
+  private readonly gaps = new HistoryGapTracker()
+
+  historyGaps(): HistoryGap[] {
+    return this.gaps.gaps
+  }
+
+
+  rejectedTradeCounts(): TradeRejectCounts {
+    return this.rejections.counts
+  }
+
   private buildHeaders(
     credentials: ExchangeCredentials,
     method: string,
@@ -60,17 +129,34 @@ export class BitgetAdapter implements ExchangeAdapter {
     }
   }
 
-  async validateCredentials(credentials: ExchangeCredentials): Promise<boolean> {
+  async validateCredentials(credentials: ExchangeCredentials): Promise<CredentialProbeResult> {
     try {
-      if (!credentials.passphrase) return false
-      const path = '/api/v2/spot/account/assets'
-      const headers = this.buildHeaders(credentials, 'GET', path)
-      const response = await fetchWithRetry(`${BASE_URL}${path}`, { headers })
-      if (!response.ok) return false
-      const data = (await response.json()) as { code: string }
-      return data.code === '00000'
-    } catch {
-      return false
+      if (!credentials.passphrase || !credentials.apiSecret.trim()) {
+        return probeFailure('INVALID_SECRET_OR_PASSPHRASE')
+      }
+      const infoPath = '/api/v2/user/apikey-info'
+      const infoResponse = await fetchWithRetry(`${BASE_URL}${infoPath}`, () => ({
+        headers: this.buildHeaders(credentials, 'GET', infoPath),
+      }))
+      const infoBody = await readJson(infoResponse)
+      const infoRecord = infoBody && typeof infoBody === 'object' ? infoBody as Record<string, unknown> : null
+      const infoCode = infoRecord && (typeof infoRecord.code === 'string' || typeof infoRecord.code === 'number')
+        ? String(infoRecord.code)
+        : ''
+      const missingInfo = infoResponse.status === 404 || infoCode === '40404'
+      if (!missingInfo) {
+        return interpretBitgetApiKeyInfo(infoResponse.status, bitgetAccountInfoBody(infoBody))
+      }
+      const assetsPath = '/api/v2/spot/account/assets'
+      const assetsResponse = await fetchWithRetry(`${BASE_URL}${assetsPath}`, () => ({
+        headers: this.buildHeaders(credentials, 'GET', assetsPath),
+      }))
+      return interpretBitgetApiKeyInfo(assetsResponse.status, await readJson(assetsResponse))
+    } catch (error) {
+      if (error instanceof Error && error.message === 'UNSUPPORTED_SIGNING_KEY') {
+        return probeFailure('INVALID_SECRET_OR_PASSPHRASE')
+      }
+      return probeFailure('EXCHANGE_UNREACHABLE')
     }
   }
 
@@ -79,7 +165,12 @@ export class BitgetAdapter implements ExchangeAdapter {
     return false
   }
 
-  async fetchTrades(credentials: ExchangeCredentials, since?: Date): Promise<ExchangeAdapterTrade[]> {
+  private scanEndMs = 0
+
+  async fetchTrades(credentials: ExchangeCredentials, since?: Date, until?: Date): Promise<ExchangeAdapterTrade[]> {
+    this.scanEndMs = until?.getTime() ?? Date.now()
+    this.rejections.reset()
+    this.gaps.reset()
     const startTime = since ? since.getTime() : Date.now() - DEFAULT_LOOKBACK_MS
     const [spotTrades, futuresTrades] = await Promise.all([
       this.fetchSpotTrades(credentials, startTime),
@@ -106,7 +197,7 @@ export class BitgetAdapter implements ExchangeAdapter {
     startTime: number
   ): Promise<ExchangeAdapterTrade[] | null> {
     const allTrades: ExchangeAdapterTrade[] = []
-    const now = Date.now()
+    const now = this.scanEndMs
     let windowStart = startTime
 
     while (windowStart <= now) {
@@ -122,8 +213,9 @@ export class BitgetAdapter implements ExchangeAdapter {
         if (idLessThan) query.set('idLessThan', idLessThan)
 
         const path = `/api/v2/spot/trade/fills?${query.toString()}`
-        const headers = this.buildHeaders(credentials, 'GET', path)
-        const response = await fetchWithRetry(`${BASE_URL}${path}`, { headers })
+        const request = () => ({ headers: this.buildHeaders(credentials, 'GET', path) })
+        const response = await fetchWithRetry(`${BASE_URL}${path}`, request)
+        throwOnServerPage(response)
         if (!response.ok) return null
 
         const data = (await response.json()) as {
@@ -136,13 +228,14 @@ export class BitgetAdapter implements ExchangeAdapter {
           if (message.includes('symbol')) {
             return null
           }
+          this.gaps.record('spot', windowStart, windowEnd)
           break
         }
 
         const list = data.data ?? []
         if (list.length === 0) break
 
-        allTrades.push(...list.map((trade) => this.normalizeSpotTrade(trade)))
+        allTrades.push(...list.flatMap((trade) => this.accepted(this.normalizeSpotTrade(trade))))
 
         const nextCursor = list[list.length - 1]?.tradeId ?? ''
         if (!nextCursor || list.length < 100) break
@@ -162,7 +255,7 @@ export class BitgetAdapter implements ExchangeAdapter {
     startTime: number
   ): Promise<ExchangeAdapterTrade[]> {
     const allTrades: ExchangeAdapterTrade[] = []
-    const now = Date.now()
+    const now = this.scanEndMs
     const symbols = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'XRPUSDT', 'DOGEUSDT']
 
     for (const symbol of symbols) {
@@ -182,9 +275,10 @@ export class BitgetAdapter implements ExchangeAdapter {
           if (idLessThan) query.set('idLessThan', idLessThan)
 
           const path = `/api/v2/spot/trade/fills?${query.toString()}`
-          const headers = this.buildHeaders(credentials, 'GET', path)
-          const response = await fetchWithRetry(`${BASE_URL}${path}`, { headers })
-          if (!response.ok) break
+          const request = () => ({ headers: this.buildHeaders(credentials, 'GET', path) })
+          const response = await fetchWithRetry(`${BASE_URL}${path}`, request)
+          throwOnServerPage(response)
+          if (!response.ok) { this.gaps.record('spot', windowStart, windowEnd); break }
 
           const data = (await response.json()) as {
             code: string
@@ -192,14 +286,14 @@ export class BitgetAdapter implements ExchangeAdapter {
             msg?: string
           }
           if (data.code !== '00000') {
-            if (data.msg?.toLowerCase().includes('symbol')) break
+            this.gaps.record('spot', windowStart, windowEnd)
             break
           }
 
           const list = data.data ?? []
           if (list.length === 0) break
 
-          allTrades.push(...list.map((trade) => this.normalizeSpotTrade(trade)))
+          allTrades.push(...list.flatMap((trade) => this.accepted(this.normalizeSpotTrade(trade))))
 
           const nextCursor = list[list.length - 1]?.tradeId ?? ''
           if (!nextCursor || list.length < 100) break
@@ -225,8 +319,8 @@ export class BitgetAdapter implements ExchangeAdapter {
     const recentTrades = await this.fetchRecentFuturesHistory(credentials, productTypes)
 
     const allTrades: ExchangeAdapterTrade[] = []
-    const now = Date.now()
-    const historyStartTime = startTime
+    const now = this.scanEndMs
+    const historyStartTime = Math.max(startTime, now - BITGET_HISTORY_LOOKBACK_MS)
 
     for (const productType of productTypes) {
       let windowStart = historyStartTime
@@ -245,9 +339,10 @@ export class BitgetAdapter implements ExchangeAdapter {
           if (idLessThan) query.set('idLessThan', idLessThan)
 
           const path = `/api/v2/mix/order/fill-history?${query.toString()}`
-          const headers = this.buildHeaders(credentials, 'GET', path)
-          const response = await fetchWithRetry(`${BASE_URL}${path}`, { headers })
-          if (!response.ok) break
+          const request = () => ({ headers: this.buildHeaders(credentials, 'GET', path) })
+          const response = await fetchWithRetry(`${BASE_URL}${path}`, request)
+          throwOnServerPage(response)
+          if (!response.ok) { this.gaps.record(productType, windowStart, windowEnd); break }
 
           const data = (await response.json()) as {
             code: string
@@ -256,12 +351,12 @@ export class BitgetAdapter implements ExchangeAdapter {
               endId?: string | null
             }
           }
-          if (data.code !== '00000') break
+          if (data.code !== '00000') { this.gaps.record(productType, windowStart, windowEnd); break }
 
           const list = data.data?.fillList ?? []
           if (list.length === 0) break
 
-          allTrades.push(...list.map((trade) => this.normalizeFuturesTrade(trade)))
+          allTrades.push(...list.flatMap((trade) => this.accepted(this.normalizeFuturesTrade(trade))))
 
           const nextCursor = data.data?.endId ?? ''
           if (!nextCursor || list.length < 100) break
@@ -302,9 +397,10 @@ export class BitgetAdapter implements ExchangeAdapter {
         if (idLessThan) query.set('idLessThan', idLessThan)
 
         const path = `/api/v2/mix/order/fill-history?${query.toString()}`
-        const headers = this.buildHeaders(credentials, 'GET', path)
-        const response = await fetchWithRetry(`${BASE_URL}${path}`, { headers })
-        if (!response.ok) break
+        const request = () => ({ headers: this.buildHeaders(credentials, 'GET', path) })
+        const response = await fetchWithRetry(`${BASE_URL}${path}`, request)
+        throwOnServerPage(response)
+          if (!response.ok) break
 
         const data = (await response.json()) as {
           code: string
@@ -319,7 +415,7 @@ export class BitgetAdapter implements ExchangeAdapter {
         const list = data.data?.fillList ?? []
         if (list.length === 0) break
 
-        allTrades.push(...list.map((trade) => this.normalizeFuturesTrade(trade)))
+        allTrades.push(...list.flatMap((trade) => this.accepted(this.normalizeFuturesTrade(trade))))
 
         const nextCursor = data.data?.endId ?? ''
         if (!nextCursor || list.length < 100) break
@@ -338,8 +434,8 @@ export class BitgetAdapter implements ExchangeAdapter {
     startTime: number
   ): Promise<ExchangeAdapterTrade[]> {
     const allTrades: ExchangeAdapterTrade[] = []
-    const now = Date.now()
-    const historyStartTime = Math.max(startTime, now - BITGET_HISTORY_POSITION_LOOKBACK_MS)
+    const now = this.scanEndMs
+    const historyStartTime = Math.max(startTime, now - BITGET_HISTORY_LOOKBACK_MS)
     let lastEndId = ''
 
     for (let page = 0; page < 30; page += 1) {
@@ -351,16 +447,17 @@ export class BitgetAdapter implements ExchangeAdapter {
       if (lastEndId) query.set('lastEndId', lastEndId)
 
       const path = `/api/v2/mix/position/history-position?${query.toString()}`
-      const headers = this.buildHeaders(credentials, 'GET', path)
-      const response = await fetchWithRetry(`${BASE_URL}${path}`, { headers })
-      if (!response.ok) break
+      const request = () => ({ headers: this.buildHeaders(credentials, 'GET', path) })
+      const response = await fetchWithRetry(`${BASE_URL}${path}`, request)
+      throwOnServerPage(response)
+          if (!response.ok) { this.gaps.record('position_history', historyStartTime, now); break }
 
       const data = (await response.json()) as {
         code: string
         data?: BitgetPositionHistoryData
       }
 
-      if (data.code !== '00000') break
+      if (data.code !== '00000') { this.gaps.record('position_history', historyStartTime, now); break }
 
       const rows = this.extractPositionHistoryRows(data.data ?? null)
       if (rows.length === 0) break
@@ -394,50 +491,47 @@ export class BitgetAdapter implements ExchangeAdapter {
     return ''
   }
 
+  private accepted(trade: ExchangeAdapterTrade | null): ExchangeAdapterTrade[] {
+    return trade ? [trade] : []
+  }
+
   private normalizePositionHistoryTrade(position: BitgetHistoryPosition): ExchangeAdapterTrade | null {
     const symbol = (position.symbol ?? '').replace(/_/g, '')
     if (!symbol) return null
 
-    const openFee = parseFloat(position.openFee ?? '0')
-    const closeFee = parseFloat(position.closeFee ?? '0')
-    const fee = Math.abs((Number.isFinite(openFee) ? openFee : 0) + (Number.isFinite(closeFee) ? closeFee : 0))
-    const netProfit = parseFloat(position.netProfit ?? '')
-    const parsedPnl = Number.isFinite(netProfit) ? netProfit : parseFloat(position.pnl ?? '')
-    const pnl = Number.isFinite(parsedPnl) ? parsedPnl : null
-    if (pnl === null) return null
-
-    const parsedFunding = parseFloat(position.totalFunding ?? '0')
-    const fundingFee = Number.isFinite(parsedFunding) ? parsedFunding : 0
+    const openFee = decimalOrZero(position.openFee, this.rejections)
+    if (!openFee) return null
+    const closeFee = decimalOrZero(position.closeFee, this.rejections)
+    if (!closeFee) return null
+    const fee = addDecimals(openFee, closeFee)
+    if (!fee) return this.rejections.reject('INVALID_NUMBER')
+    const netProfit = optionalDecimal(position.netProfit, this.rejections)
+    if (netProfit === undefined) return null
+    const fallbackPnl = netProfit === null ? optionalDecimal(position.pnl, this.rejections) : netProfit
+    if (fallbackPnl === undefined || fallbackPnl === null) return null
+    const fundingFee = decimalOrZero(position.totalFunding, this.rejections)
+    if (!fundingFee) return null
     const side: 'buy' | 'sell' = (position.holdSide ?? '').toLowerCase() === 'short' ? 'buy' : 'sell'
-    const tradedAtRaw = parseInt(
-      position.uTime ?? position.utime ?? position.cTime ?? position.ctime ?? String(Date.now()),
-      10
-    )
-    const tradedAtTs = Number.isFinite(tradedAtRaw)
-      ? tradedAtRaw > 1_000_000_000_000
-        ? tradedAtRaw
-        : tradedAtRaw * 1000
-      : Date.now()
-    const tradedAt = new Date(tradedAtTs).toISOString()
+    const rawTime = position.uTime ?? position.utime ?? position.cTime ?? position.ctime
+    const tradedAt = parseBitgetCTime(rawTime)
+    if (!tradedAt) return this.rejections.reject('INVALID_TIMESTAMP')
 
     const tradeIdParts = [
       position.positionId ?? position.trackingNo ?? '',
       position.symbol ?? '',
-      position.uTime ?? position.utime ?? position.cTime ?? position.ctime ?? '',
+      rawTime ?? '',
     ].filter((part) => part.length > 0)
-    const externalTradeId =
-      tradeIdParts.join(':') ||
-      `futures_position_${position.uTime ?? position.utime ?? position.cTime ?? position.ctime ?? Date.now()}`
+    if (tradeIdParts.length === 0) return this.rejections.reject('MISSING_ID')
 
     return {
-      external_trade_id: externalTradeId,
+      external_trade_id: tradeIdParts.join(':'),
       symbol,
       side,
-      quantity: 0,
-      price: 0,
+      quantity: '0',
+      price: '0',
       fee,
       fee_currency: position.marginCoin ?? 'USDT',
-      realized_pnl: pnl,
+      realized_pnl: fallbackPnl,
       funding_fee: fundingFee,
       income_type: 'history_position',
       trade_type: 'futures',
@@ -464,8 +558,8 @@ export class BitgetAdapter implements ExchangeAdapter {
   async fetchOpenPositions(credentials: ExchangeCredentials): Promise<UnrealizedPosition[]> {
     const query = new URLSearchParams({ productType: 'umcbl' })
     const path = `/api/mix/v1/position/allPosition-v2?${query.toString()}`
-    const headers = this.buildHeaders(credentials, 'GET', path)
-    const response = await fetchWithRetry(`${BASE_URL}${path}`, { headers })
+    const request = () => ({ headers: this.buildHeaders(credentials, 'GET', path) })
+    const response = await fetchWithRetry(`${BASE_URL}${path}`, request)
 
     if (!response.ok) return []
 
@@ -488,8 +582,8 @@ export class BitgetAdapter implements ExchangeAdapter {
 
   async fetchBalances(credentials: ExchangeCredentials): Promise<AssetBalance[]> {
     const spotPath = '/api/v2/spot/account/assets'
-    const spotHeaders = this.buildHeaders(credentials, 'GET', spotPath)
-    const spotResponse = await fetchWithRetry(`${BASE_URL}${spotPath}`, { headers: spotHeaders })
+    const spotRequest = () => ({ headers: this.buildHeaders(credentials, 'GET', spotPath) })
+    const spotResponse = await fetchWithRetry(`${BASE_URL}${spotPath}`, spotRequest)
 
     if (!spotResponse.ok) return []
 
@@ -525,56 +619,81 @@ export class BitgetAdapter implements ExchangeAdapter {
     return balances
   }
 
-  private normalizeSpotTrade(trade: BitgetSpotFill): ExchangeAdapterTrade {
+  private normalizeSpotTrade(trade: BitgetSpotFill): ExchangeAdapterTrade | null {
+    const tradedAt = parseBitgetCTime(trade.cTime)
+    if (!tradedAt) return this.rejections.reject('INVALID_TIMESTAMP')
+    const externalTradeId = String(trade.tradeId ?? '').trim()
+    if (!externalTradeId) return this.rejections.reject('MISSING_ID')
+    const quantity = requiredDecimal(trade.size, this.rejections)
+    if (!quantity) return null
+    const price = requiredDecimal(trade.priceAvg, this.rejections)
+    if (!price) return null
+    const fee = decimalOrZero(trade.feeDetail?.totalFee, this.rejections)
+    if (!fee) return null
     const side = (trade.side ?? '').toLowerCase() === 'sell' ? 'sell' : 'buy'
-    const fee = trade.feeDetail?.totalFee ? parseFloat(trade.feeDetail.totalFee) : 0
     return {
-      external_trade_id: trade.tradeId,
+      external_trade_id: externalTradeId,
       symbol: (trade.symbol ?? '').replace(/_/g, ''),
       side,
-      quantity: parseFloat(trade.size ?? '0'),
-      price: parseFloat(trade.priceAvg ?? '0'),
+      quantity,
+      price,
       fee,
       fee_currency: trade.feeDetail?.feeCoin ?? 'USDT',
       realized_pnl: null,
-      funding_fee: 0,
+      funding_fee: '0',
       income_type: null,
       trade_type: 'spot',
-      traded_at: new Date(parseInt(trade.cTime ?? String(Date.now()), 10)).toISOString(),
+      traded_at: tradedAt,
       raw_data: trade as unknown as Record<string, unknown>,
     }
   }
 
-  private normalizeFuturesTrade(trade: BitgetFuturesFill): ExchangeAdapterTrade {
-    const parsedFee = trade.fee ? Math.abs(parseFloat(trade.fee)) : 0
-    const fee = Number.isFinite(parsedFee) ? parsedFee : 0
-    const parsedPnl = trade.pnl ? parseFloat(trade.pnl) : null
-    const pnl = parsedPnl !== null && Number.isFinite(parsedPnl) ? parsedPnl : null
+  private normalizeFuturesTrade(trade: BitgetFuturesFill): ExchangeAdapterTrade | null {
+    const tradedAt = parseBitgetCTime(trade.cTime)
+    if (!tradedAt) return this.rejections.reject('INVALID_TIMESTAMP')
+    const externalTradeId = String(trade.tradeId ?? trade.orderId ?? '').trim()
+    if (!externalTradeId) return this.rejections.reject('MISSING_ID')
+    const fee = this.futuresFillFee(trade)
+    if (!fee) return null
+    const pnl = optionalDecimal(trade.profit ?? trade.pnl, this.rejections)
+    if (pnl === undefined) return null
     const rawQuantity =
-      trade.size ?? trade.baseVolume ?? trade.fillQty ?? trade.fillSz ?? trade.qty ?? '0'
-    const rawPrice =
-      trade.price ?? trade.priceAvg ?? trade.fillPrice ?? trade.avgPrice ?? '0'
+      trade.size ?? trade.baseVolume ?? trade.fillQty ?? trade.fillSz ?? trade.qty
+    const rawPrice = trade.price ?? trade.priceAvg ?? trade.fillPrice ?? trade.avgPrice
+    const quantity = requiredDecimal(rawQuantity, this.rejections)
+    if (!quantity) return null
+    const price = requiredDecimal(rawPrice, this.rejections)
+    if (!price) return null
     const rawSide = trade.side ?? trade.tradeSide ?? 'buy'
-    const parsedQuantity = parseFloat(rawQuantity)
-    const parsedPrice = parseFloat(rawPrice)
-    const quantity = Number.isFinite(parsedQuantity) ? Math.abs(parsedQuantity) : 0
-    const price = Number.isFinite(parsedPrice) ? parsedPrice : 0
 
     return {
-      external_trade_id: trade.tradeId ?? trade.orderId ?? `futures_${trade.cTime ?? Date.now()}`,
+      external_trade_id: externalTradeId,
       symbol: (trade.symbol ?? '').replace(/_/g, ''),
       side: rawSide.toLowerCase() === 'sell' ? 'sell' : 'buy',
       quantity,
       price,
       fee,
-      fee_currency: trade.feeCoin ?? trade.marginCoin ?? 'USDT',
+      fee_currency: trade.feeCoin ?? trade.feeDetail?.[0]?.feeCoin ?? trade.marginCoin ?? 'USDT',
       realized_pnl: pnl,
-      funding_fee: 0,
+      funding_fee: '0',
       income_type: trade.tradeScope ?? 'fill_history',
       trade_type: 'futures',
-      traded_at: new Date(parseInt(trade.cTime ?? String(Date.now()), 10)).toISOString(),
+      traded_at: tradedAt,
       raw_data: trade as unknown as Record<string, unknown>,
     }
+  }
+
+  private futuresFillFee(trade: BitgetFuturesFill): string | null {
+    if (!Array.isArray(trade.feeDetail)) return decimalOrZero(trade.fee, this.rejections)
+    let total = '0'
+    for (const detail of trade.feeDetail) {
+      const part = decimalOrZero(detail?.totalFee, this.rejections)
+      if (!part) return null
+      const sum = addDecimals(total, part)
+      if (!sum) return this.rejections.reject('INVALID_NUMBER')
+      total = sum
+    }
+    return total
   }
 
   private async getUsdPrice(asset: string): Promise<number> {
@@ -643,6 +762,8 @@ type BitgetFuturesFill = {
   feeCoin?: string
   marginCoin?: string
   pnl?: string
+  profit?: string
+  feeDetail?: Array<{ feeCoin?: string; totalFee?: string }>
   tradeScope?: string
   cTime?: string
 }

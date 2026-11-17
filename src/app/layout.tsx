@@ -1,18 +1,26 @@
 import type { Metadata } from 'next'
 import './globals.css'
+import { I18nProvider } from '@/lib/i18n/client'
+import { getServerDictionary } from '@/lib/i18n/server'
 
-export const metadata: Metadata = {
-  title: 'Track PNL Pro',
-  description: 'Unified crypto PNL tracking and AI-assisted trading platform',
+const APP_NAME = 'PnLens'
+
+export async function generateMetadata(): Promise<Metadata> {
+  const { t } = await getServerDictionary()
+  return {
+    title: APP_NAME,
+    description: t.meta.description,
+  }
 }
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: {
   children: React.ReactNode
-}): React.JSX.Element {
+}): Promise<React.JSX.Element> {
+  const { locale } = await getServerDictionary()
   return (
-    <html lang="en" className="dark">
+    <html lang={locale} className="dark">
       <head>
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
@@ -26,7 +34,7 @@ export default function RootLayout({
         />
       </head>
       <body className="font-display antialiased">
-        {children}
+        <I18nProvider locale={locale}>{children}</I18nProvider>
       </body>
     </html>
   )

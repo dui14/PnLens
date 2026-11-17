@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createSupabaseServerClient } from '@/lib/db/supabase-server'
 import { removeExchangeAccount, toggleExchangeActive, updateExchangeApiKeys } from '@/lib/services/exchangeService'
-import { UpdateExchangeActiveSchema, UpdateExchangeKeysSchema } from '@/lib/validators/exchange'
+import { UpdateExchangeActiveSchema, UpdateExchangeKeysSchema, exchangeKeyErrorCode } from '@/lib/validators/exchange'
+import { consumeValidationAttempt } from '@/lib/security/validationAttemptLimit'
 
 async function getAuthenticatedUser(supabase: Awaited<ReturnType<typeof createSupabaseServerClient>>) {
   const { data: { user } } = await supabase.auth.getUser()
@@ -109,33 +110,50 @@ export async function PUT(
   const parsed = UpdateExchangeKeysSchema.safeParse(body)
   if (!parsed.success) {
     return NextResponse.json(
-      { success: false, data: null, error: 'VALIDATION_ERROR' },
+      { success: false, data: null, error: exchangeKeyErrorCode(parsed.error) },
       { status: 400 }
     )
   }
 
   const { id } = await params
-  const { apiKey, apiSecret, passphrase, label, proxy } = parsed.data
+  const { apiKey, apiSecret, passphrase, label } = parsed.data
+
+  if (!consumeValidationAttempt(user.id)) {
+    return NextResponse.json(
+      { success: false, data: null, error: 'RATE_LIMITED' },
+      { status: 429 }
+    )
+  }
+
   const result = await updateExchangeApiKeys(
     supabase,
     user.id,
     id,
     apiKey,
-    apiSecret,
+    apiSecret ?? '',
     passphrase,
-    label === undefined ? undefined : (label ?? undefined),
-    proxy
+    label === undefined ? undefined : (label ?? undefined)
   )
 
   if (!result.success) {
     const statusMap: Record<string, number> = {
       NOT_FOUND: 404,
       PASSPHRASE_REQUIRED: 400,
+      INVALID_KEY: 400,
       INVALID_API_KEY: 400,
+      INVALID_SECRET_OR_PASSPHRASE: 400,
+      PRIVATE_KEY_INVALID: 400,
+      PRIVATE_KEY_ALGORITHM_UNSUPPORTED: 400,
+      IP_NOT_WHITELISTED: 400,
+      TRADE_PERMISSION_DETECTED: 400,
+      WITHDRAW_PERMISSION_DETECTED: 400,
+      TRANSFER_PERMISSION_DETECTED: 400,
+      GEO_BLOCKED: 400,
       EXCHANGE_REGION_BLOCKED: 400,
       EXCHANGE_TIME_DRIFT: 400,
+      RATE_LIMITED: 429,
       EXCHANGE_UNREACHABLE: 502,
-      WITHDRAW_PERMISSION_DETECTED: 400,
+      UNKNOWN: 502,
       UNSUPPORTED_EXCHANGE: 400,
       INTERNAL_ERROR: 500,
     }
@@ -145,5 +163,10 @@ export async function PUT(
     )
   }
 
-  return NextResponse.json({ success: true, data: result.data, error: null })
+  return NextResponse.json({
+    success: true,
+    data: result.data.account,
+    warnings: result.data.warnings,
+    error: null,
+  })
 }

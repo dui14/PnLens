@@ -1,6 +1,10 @@
+import type { AiChatTarget } from '@/lib/types'
+import { AI_PROVIDER_CHAT_URLS } from '@/lib/ai/providerConfig'
+import { buildChatBodyFields, buildChatHeaders } from '@/lib/ai/providerRequest'
+
 const LLM_TIMEOUT = 30_000
-const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1/chat/completions'
-const DEFAULT_MODEL = 'openai/gpt-4o-mini'
+const LLM_TEMPERATURE = 0.7
+const LLM_MAX_TOKENS = 2048
 
 type LLMMessage = {
   role: 'system' | 'user' | 'assistant'
@@ -14,7 +18,7 @@ type StreamChunk = {
   tokensUsed?: number
 }
 
-type OpenRouterSSEChunk = {
+type SSEChunk = {
   choices?: {
     delta?: { content?: string }
     finish_reason?: string | null
@@ -26,36 +30,29 @@ type OpenRouterSSEChunk = {
 
 export async function streamChatCompletion(
   messages: LLMMessage[],
-  onChunk: (chunk: StreamChunk) => void
+  onChunk: (chunk: StreamChunk) => void,
+  credentials: AiChatTarget
 ): Promise<{ content: string; tokensUsed: number }> {
-  const apiKey = process.env.OPENROUTER_API_KEY
-  if (!apiKey) throw new Error('OPENROUTER_API_KEY is not set')
+  const { provider, apiKey } = credentials
 
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), LLM_TIMEOUT)
 
   try {
-    const response = await fetch(OPENROUTER_BASE_URL, {
+    const response = await fetch(AI_PROVIDER_CHAT_URLS[provider], {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-        'HTTP-Referer': process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000',
-        'X-Title': 'Track PNL Pro',
-      },
+      headers: buildChatHeaders(provider, apiKey),
       body: JSON.stringify({
-        model: DEFAULT_MODEL,
+        ...buildChatBodyFields(credentials, LLM_TEMPERATURE, LLM_MAX_TOKENS),
         messages,
         stream: true,
-        max_tokens: 2048,
-        temperature: 0.7,
       }),
       signal: controller.signal,
     })
 
     if (!response.ok) {
       const error = await response.text()
-      throw new Error(`OpenRouter API error: ${response.status} ${error}`)
+      throw new Error(`AI_REQUEST_FAILED:${response.status}:${error.slice(0, 180)}`)
     }
 
     const reader = response.body?.getReader()
@@ -82,7 +79,7 @@ export async function streamChatCompletion(
         if (!data) continue
 
         try {
-          const parsed = JSON.parse(data) as OpenRouterSSEChunk
+          const parsed = JSON.parse(data) as SSEChunk
           const content = parsed.choices?.[0]?.delta?.content
           if (content) {
             fullContent += content
@@ -102,7 +99,7 @@ export async function streamChatCompletion(
 }
 
 export function buildSystemPrompt(): string {
-  return `You are an expert crypto trading assistant for Track PNL Pro platform. You help traders analyze their performance, understand PNL, interpret trading metrics, and improve their strategies.
+  return `You are an expert crypto trading assistant for PnLens platform. You help traders analyze their performance, understand PNL, interpret trading metrics, and improve their strategies.
 Be concise, data-driven, and educational. Always remind users that crypto trading involves significant risk.
 Never provide specific buy/sell signals or guarantee returns.`
 }

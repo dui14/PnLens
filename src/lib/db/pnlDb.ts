@@ -1,74 +1,54 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
-import type { PNLSnapshot, PeriodType } from '@/lib/types'
+import type {
+  PnlSnapshotPayload,
+  PnlSnapshotRecord,
+  PnlSnapshotRowInput,
+  SnapshotExchange,
+  TradeSegment,
+} from '@/lib/types'
 
-export async function getPNLSnapshot(
-  supabase: SupabaseClient,
-  userId: string,
-  periodType: PeriodType,
-  exchangeAccountId?: string
-): Promise<PNLSnapshot | null> {
-  let query = supabase
-    .from('pnl_snapshots')
-    .select('*')
-    .eq('user_id', userId)
-    .eq('period_type', periodType)
-    .order('calculated_at', { ascending: false })
-    .limit(1)
+const SNAPSHOT_CONFLICT_KEY = 'user_id,segment,exchange'
 
-  if (exchangeAccountId) {
-    query = query.eq('exchange_account_id', exchangeAccountId)
-  } else {
-    query = query.is('exchange_account_id', null)
-  }
-
-  const { data, error } = await query
-  if (error || !data || data.length === 0) return null
-  return data[0] as PNLSnapshot
+export type PnlSnapshotUpsertRow = PnlSnapshotRowInput & {
+  user_id: string
+  job_id: string
+  calculated_at: string
 }
 
-export async function upsertPNLSnapshot(
+export async function getPnlSnapshot(
   supabase: SupabaseClient,
-  snapshot: Omit<PNLSnapshot, 'id' | 'calculated_at'>
-): Promise<boolean> {
-  const { error } = await supabase.from('pnl_snapshots').upsert(
-    { ...snapshot, calculated_at: new Date().toISOString() },
-    {
-      onConflict: 'user_id,exchange_account_id,period_type,period_start',
-    }
-  )
+  userId: string,
+  segment: TradeSegment,
+  exchange: SnapshotExchange
+): Promise<PnlSnapshotRecord | null> {
+  const { data, error } = await supabase
+    .from('pnl_snapshots')
+    .select('payload, calculated_at')
+    .eq('user_id', userId)
+    .eq('segment', segment)
+    .eq('exchange', exchange)
+    .maybeSingle()
 
   if (error) {
-    console.error('[pnlDb] upsertPNLSnapshot failed:', error.message)
+    console.error('[pnlDb] getPnlSnapshot failed:', error.message)
+    return null
+  }
+  if (!data) return null
+
+  return {
+    calculatedAt: data.calculated_at as string,
+    payload: data.payload as PnlSnapshotPayload,
+  }
+}
+
+export async function upsertPnlSnapshots(
+  supabase: SupabaseClient,
+  rows: PnlSnapshotUpsertRow[]
+): Promise<boolean> {
+  const { error } = await supabase.from('pnl_snapshots').upsert(rows, { onConflict: SNAPSHOT_CONFLICT_KEY })
+
+  if (error) {
+    console.error('[pnlDb] upsertPnlSnapshots failed:', error.message)
   }
   return !error
-}
-
-export async function getPNLTimeSeries(
-  supabase: SupabaseClient,
-  userId: string,
-  startDate: string,
-  endDate: string,
-  exchangeAccountId?: string
-): Promise<PNLSnapshot[]> {
-  let query = supabase
-    .from('pnl_snapshots')
-    .select('period_start, period_end, total_pnl')
-    .eq('user_id', userId)
-    .eq('period_type', 'day')
-    .gte('period_start', startDate)
-    .lte('period_start', endDate)
-    .order('period_start', { ascending: true })
-
-  if (exchangeAccountId) {
-    query = query.eq('exchange_account_id', exchangeAccountId)
-  } else {
-    query = query.is('exchange_account_id', null)
-  }
-
-  const { data, error } = await query
-  if (error) {
-    console.error('[pnlDb] getPNLTimeSeries failed:', error.message)
-    return []
-  }
-  return (data ?? []) as PNLSnapshot[]
 }

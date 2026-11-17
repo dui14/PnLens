@@ -18,7 +18,7 @@ export async function getUserById(
 export async function updateUser(
   supabase: SupabaseClient,
   userId: string,
-  updates: Partial<Pick<UserProfile, 'display_name' | 'email' | 'avatar_url'>>
+  updates: Partial<Pick<UserProfile, 'display_name' | 'avatar_url'>>
 ): Promise<UserProfile | null> {
   const { data, error } = await supabase
     .from('users')
@@ -43,19 +43,6 @@ export async function getUserDemoBalance(
 
   if (error) return 0
   return Number(data?.demo_balance ?? 0)
-}
-
-export async function updateUserDemoBalance(
-  supabase: SupabaseClient,
-  userId: string,
-  newBalance: number
-): Promise<boolean> {
-  const { error } = await supabase
-    .from('users')
-    .update({ demo_balance: newBalance })
-    .eq('id', userId)
-
-  return !error
 }
 
 export async function upsertUser(
