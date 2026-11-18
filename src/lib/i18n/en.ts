@@ -356,10 +356,7 @@ export const en = {
     apiSecretPlaceholder: 'Paste your API secret here',
     passphrase: 'Passphrase',
     passphrasePlaceholder: 'Paste your exchange passphrase',
-    useProxy: 'Use Proxy',
-    proxyHint: 'Enable if your production server region is blocked by exchange.',
-    proxy: 'Proxy',
-    proxyPlaceholder: 'host:port:user:pass or http://user:pass@host:port',
+    noIpWhitelist: 'Do not enable IP whitelist on this API key.',
     readOnlyNotice:
       'Use read-only API keys. Never grant withdrawal permissions. Keys are encrypted with AES-256-GCM.',
     keysUpdated: 'Keys Updated',
