@@ -356,10 +356,7 @@ export const vi: Dictionary = {
     apiSecretPlaceholder: 'Dán mã bí mật API tại đây',
     passphrase: 'Passphrase',
     passphrasePlaceholder: 'Dán passphrase của sàn',
-    useProxy: 'Dùng proxy',
-    proxyHint: 'Bật nếu khu vực máy chủ production bị sàn chặn.',
-    proxy: 'Proxy',
-    proxyPlaceholder: 'host:port:user:pass hoặc http://user:pass@host:port',
+    noIpWhitelist: 'Không bật IP whitelist cho API key này.',
     readOnlyNotice:
       'Chỉ dùng khóa API chỉ đọc. Tuyệt đối không cấp quyền rút tiền. Khóa được mã hóa bằng AES-256-GCM.',
     keysUpdated: 'Đã cập nhật khóa',
