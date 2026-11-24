@@ -54,6 +54,7 @@ CLAUDE.local.md
 !README.md
 !/ARCHITECTURE.md
 !/CONTRIBUTING.md
+!/DECISIONS.md
 
 # Logs
 *.log
