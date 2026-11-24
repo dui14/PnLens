@@ -1,54 +1,98 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useMemo, useState } from 'react'
 import {
+  Bar,
   CartesianGrid,
+  Cell,
+  ComposedChart,
   Line,
-  LineChart,
   ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from 'recharts'
-import type { Exchange, PNLChartPoint, TradeSegment } from '@/lib/types'
+import { useT } from '@/lib/i18n/client'
+import type { ChartRange, PNLChartPoint } from '@/lib/types'
 
-type ChartRangeOption = { label: string; value: string }
-
-const CHART_RANGES: ChartRangeOption[] = [
-  { label: 'W', value: 'week' },
-  { label: 'M', value: 'month' },
-  { label: 'Y', value: 'year' },
+const CHART_RANGES: { key: 'week' | 'month' | 'year'; value: ChartRange }[] = [
+  { key: 'week', value: 'week' },
+  { key: 'month', value: 'month' },
+  { key: 'year', value: 'year' },
 ]
 
 type ChartDatum = {
   date: string
+  pnl: number
   cumulative_pnl: number
 }
 
-function formatCurrency(value: number): string {
-  return value.toLocaleString('en-US', {
+const COLOR_POSITIVE = '#10b981'
+const COLOR_NEGATIVE = '#f43f5e'
+const COLOR_NEUTRAL = '#64748b'
+
+function signColor(value: number): string {
+  if (value > 0) return COLOR_POSITIVE
+  if (value < 0) return COLOR_NEGATIVE
+  return COLOR_NEUTRAL
+}
+
+function formatSigned(value: number, intlLocale: string): string {
+  const sign = value > 0 ? '+' : value < 0 ? '-' : ''
+  return `${sign}$${formatCurrency(Math.abs(value), intlLocale)}`
+}
+
+type TooltipProps = {
+  active?: boolean
+  payload?: { payload: ChartDatum }[]
+  range: string
+  intlLocale: string
+  periodLabel: string
+  cumulativeLabel: string
+}
+
+function ChartTooltip({ active, payload, range, intlLocale, periodLabel, cumulativeLabel }: TooltipProps): React.JSX.Element | null {
+  const datum = payload?.[0]?.payload
+  if (!active || !datum) return null
+  return (
+    <div className="rounded-[10px] border border-slate-300 bg-slate-50/95 px-3 py-2 text-xs text-slate-900 shadow-sm">
+      <p className="mb-1 font-semibold">{formatDateTick(datum.date, range, intlLocale)}</p>
+      <p className="flex justify-between gap-4">
+        <span>{periodLabel}</span>
+        <span className="font-mono font-bold" style={{ color: signColor(datum.pnl) }}>{formatSigned(datum.pnl, intlLocale)}</span>
+      </p>
+      <p className="flex justify-between gap-4">
+        <span>{cumulativeLabel}</span>
+        <span className="font-mono font-bold" style={{ color: signColor(datum.cumulative_pnl) }}>{formatSigned(datum.cumulative_pnl, intlLocale)}</span>
+      </p>
+    </div>
+  )
+}
+
+function formatCurrency(value: number, intlLocale: string): string {
+  return value.toLocaleString(intlLocale, {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   })
 }
 
-function formatDateTick(value: string, range: string): string {
+function formatDateTick(value: string, range: string, intlLocale: string): string {
   if (range === 'year') {
     const [year, month] = value.split('-')
-    const date = new Date(Number(year), Number(month) - 1, 1)
-    return date.toLocaleDateString('en-US', { month: 'short' })
+    const date = new Date(`${year}-${month}-01T00:00:00+07:00`)
+    return date.toLocaleDateString(intlLocale, { timeZone: 'Asia/Ho_Chi_Minh', month: 'short' })
   }
 
-  const date = new Date(value)
-  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+  const date = new Date(`${value}T00:00:00+07:00`)
+  return date.toLocaleDateString(intlLocale, { timeZone: 'Asia/Ho_Chi_Minh', month: 'short', day: 'numeric' })
 }
 
 function getYDomain(data: ChartDatum[]): [number, number] {
   if (data.length === 0) return [-1, 1]
 
   const maxAbs = Math.max(
-    ...data.map((point) => Math.abs(point.cumulative_pnl)),
+    ...data.map((point) => Math.max(Math.abs(point.cumulative_pnl), Math.abs(point.pnl))),
     1
   )
 
@@ -56,47 +100,24 @@ function getYDomain(data: ChartDatum[]): [number, number] {
 }
 
 type PNLChartProps = {
-  segment: TradeSegment
-  exchange: 'all' | Exchange
+  chart: Record<ChartRange, PNLChartPoint[]>
 }
 
-export function PNLChart({ segment, exchange }: PNLChartProps): React.JSX.Element {
-  const [range, setRange] = useState('month')
-  const [points, setPoints] = useState<ChartDatum[]>([])
-  const [loading, setLoading] = useState(true)
-
-  useEffect(() => {
-    const params = new URLSearchParams({
-      range,
-      segment,
-    })
-
-    if (exchange !== 'all') {
-      params.set('exchange', exchange)
-    }
-
-    setLoading(true)
-    fetch(`/api/pnl/chart?${params.toString()}`)
-      .then((r) => r.json())
-      .then((data) => {
-        if (data.success) {
-          setPoints((data.data ?? []) as PNLChartPoint[])
-        }
-        else setPoints([])
-      })
-      .catch(() => setPoints([]))
-      .finally(() => setLoading(false))
-  }, [exchange, range, segment])
+export function PNLChart({ chart }: PNLChartProps): React.JSX.Element {
+  const { t, intlLocale } = useT()
+  const c = t.chart
+  const [range, setRange] = useState<ChartRange>('month')
+  const points: ChartDatum[] = useMemo(() => chart[range] ?? [], [chart, range])
 
   const hasData = points.length > 0
   const yDomain = getYDomain(points)
 
   return (
-    <div className="bg-background-light dark:bg-background-dark p-4 sm:p-6 rounded-xl border border-slate-200 dark:border-primary/20 shadow-sm h-full">
+    <div className="bg-background-light dark:bg-background-dark p-4 sm:p-6 rounded-xl border border-slate-200 dark:border-primary/20 shadow-sm">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-6">
         <div>
-          <h2 className="text-lg font-bold">Cumulative PNL Performance</h2>
-          <p className="text-sm text-slate-500">Time on X-axis, USD on Y-axis, centered at $0</p>
+          <h2 className="text-lg font-bold">{c.title}</h2>
+          <p className="text-sm text-slate-500">{c.subtitle}</p>
         </div>
         <div className="overflow-x-auto">
           <div className="inline-flex gap-2">
@@ -110,7 +131,7 @@ export function PNLChart({ segment, exchange }: PNLChartProps): React.JSX.Elemen
                     : 'hover:bg-slate-100 dark:hover:bg-primary/5 text-slate-400'
                 }`}
               >
-                {r.label}
+                {c.ranges[r.key]}
               </button>
             ))}
           </div>
@@ -118,20 +139,15 @@ export function PNLChart({ segment, exchange }: PNLChartProps): React.JSX.Elemen
       </div>
 
       <div className="relative h-56 sm:h-64 w-full">
-        {loading && (
-          <div className="absolute inset-0 flex items-center justify-center">
-            <span className="material-symbols-outlined animate-spin text-primary/40 text-3xl">refresh</span>
-          </div>
-        )}
-        {!loading && !hasData && (
+        {!hasData && (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-2">
             <span className="material-symbols-outlined text-slate-300 dark:text-slate-600 text-4xl">show_chart</span>
-            <p className="text-sm text-slate-400">No trade data for this period</p>
+            <p className="text-sm text-slate-400">{c.empty}</p>
           </div>
         )}
-        {!loading && hasData && (
+        {hasData && (
           <ResponsiveContainer width="100%" height="100%">
-            <LineChart
+            <ComposedChart
               data={points}
               margin={{ top: 12, right: 12, left: 0, bottom: 12 }}
             >
@@ -139,12 +155,12 @@ export function PNLChart({ segment, exchange }: PNLChartProps): React.JSX.Elemen
               <XAxis
                 dataKey="date"
                 tick={{ fill: '#64748b', fontSize: 11 }}
-                tickFormatter={(value) => formatDateTick(String(value), range)}
+                tickFormatter={(value) => formatDateTick(String(value), range, intlLocale)}
                 interval="preserveStartEnd"
                 minTickGap={24}
                 axisLine={{ stroke: '#cbd5e1', opacity: 0.5 }}
                 tickLine={false}
-                label={{ value: 'Time', position: 'insideBottomRight', offset: -6, fill: '#64748b', fontSize: 11 }}
+                label={{ value: c.timeAxis, position: 'insideBottomRight', offset: -6, fill: '#64748b', fontSize: 11 }}
               />
               <YAxis
                 tick={{ fill: '#64748b', fontSize: 11 }}
@@ -152,20 +168,25 @@ export function PNLChart({ segment, exchange }: PNLChartProps): React.JSX.Elemen
                 tickLine={false}
                 domain={yDomain}
                 width={64}
-                tickFormatter={(value) => `$${Number(value).toFixed(0)}`}
-                label={{ value: '$', angle: -90, position: 'insideLeft', fill: '#64748b', fontSize: 11 }}
+                tickFormatter={(value) => `${Number(value) < 0 ? '-' : ''}$${Math.abs(Number(value)).toFixed(0)}`}
               />
               <Tooltip
-                formatter={(value) => [`$${formatCurrency(Number(value))}`, 'Cumulative PNL']}
-                labelFormatter={(value) => formatDateTick(String(value), range)}
-                contentStyle={{
-                  borderRadius: 10,
-                  border: '1px solid #cbd5e1',
-                  backgroundColor: 'rgba(248, 250, 252, 0.96)',
-                  color: '#0f172a',
-                }}
+                cursor={{ fill: '#94a3b8', fillOpacity: 0.12 }}
+                content={
+                  <ChartTooltip
+                    range={range}
+                    intlLocale={intlLocale}
+                    periodLabel={range === 'year' ? c.periodPnl.monthly : c.periodPnl.daily}
+                    cumulativeLabel={c.tooltipLabel}
+                  />
+                }
               />
               <ReferenceLine y={0} stroke="#0f172a" strokeOpacity={0.4} strokeDasharray="6 4" />
+              <Bar dataKey="pnl" maxBarSize={24} isAnimationActive={false}>
+                {points.map((point) => (
+                  <Cell key={point.date} fill={signColor(point.pnl)} fillOpacity={0.55} />
+                ))}
+              </Bar>
               <Line
                 dataKey="cumulative_pnl"
                 type="monotone"
@@ -174,7 +195,7 @@ export function PNLChart({ segment, exchange }: PNLChartProps): React.JSX.Elemen
                 dot={false}
                 activeDot={{ r: 4, fill: '#0f766e' }}
               />
-            </LineChart>
+            </ComposedChart>
           </ResponsiveContainer>
         )}
       </div>

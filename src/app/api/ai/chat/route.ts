@@ -1,7 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createSupabaseServerClient } from '@/lib/db/supabase-server'
 import { ChatMessageSchema } from '@/lib/validators/ai'
+import type { AiProvider } from '@/lib/types'
 import type { AgentEvent } from '@/lib/agent-loop'
+import { classifyAiError } from '@/lib/ai/chatErrors'
+import { getLocale } from '@/lib/i18n/server'
 import { startOrContinueChat } from '@/lib/services/aiService'
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
@@ -35,6 +38,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     )
   }
 
+  const locale = parsed.data.locale ?? (await getLocale())
+
   const encoder = new TextEncoder()
   const stream = new ReadableStream({
     async start(controller) {
@@ -51,16 +56,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           user.id,
           parsed.data.message,
           parsed.data.conversationId,
+          parsed.data.provider as AiProvider,
           parsed.data.model,
+          parsed.data.effort,
           (event) => {
             sendEvent(event)
-          }
+          },
+          locale
         )
       } catch (error) {
-        const message = error instanceof Error ? error.message : 'INTERNAL_ERROR'
+        console.error('[api/ai/chat] unhandled stream error:', error)
+        const code = classifyAiError(error)
         sendEvent({
           type: 'error',
-          payload: { message },
+          payload: { message: code, code },
         })
       } finally {
         closed = true

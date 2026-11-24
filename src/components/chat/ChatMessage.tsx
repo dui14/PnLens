@@ -1,11 +1,18 @@
 'use client'
 
-import ReactMarkdown from 'react-markdown'
+import { lazy, Suspense } from 'react'
 import type { ChatMessage as ChatMessageModel } from '@/lib/types'
+import { AppLogo } from '@/components/ui/AppLogo'
+import { collectToolLinkUrls } from '@/lib/ai/safeLinks'
 import { AgentThinkingPanel, type AgentThinkingStep } from '@/components/chat/AgentThinkingPanel'
+
+const MarkdownContent = lazy(() =>
+  import('@/components/chat/MarkdownContent').then((m) => ({ default: m.MarkdownContent }))
+)
 
 export type ChatMessageProps = {
   message: ChatMessageModel
+  errorText?: string
   showThinkingPanel?: boolean
   thinkingSteps?: AgentThinkingStep[]
   isThinking?: boolean
@@ -16,6 +23,7 @@ export type ChatMessageProps = {
 
 export function ChatMessage({
   message,
+  errorText,
   showThinkingPanel = false,
   thinkingSteps = [],
   isThinking = false,
@@ -40,12 +48,11 @@ export function ChatMessage({
     showThinkingPanel && (isThinking || thinkingSteps.length > 0) && Boolean(onToggleThinkingCollapsed)
   const handleToggleThinkingCollapsed = onToggleThinkingCollapsed ?? (() => undefined)
   const hasAssistantContent = message.content.trim().length > 0
+  const toolUrls = collectToolLinkUrls([...(message.analysis_meta?.steps ?? []), ...thinkingSteps])
 
   return (
     <div className="flex gap-2 md:gap-4 justify-start">
-      <div className="size-7 md:size-8 rounded-lg bg-primary/10 flex items-center justify-center shrink-0 mt-1">
-        <span className="material-symbols-outlined text-primary text-base">smart_toy</span>
-      </div>
+      <AppLogo size={32} className="size-7 md:size-8 mt-1" />
       <div className="min-w-0 max-w-[calc(100%-2.5rem)] md:max-w-2xl flex-1 space-y-2">
         {shouldShowThinkingPanel ? (
           <AgentThinkingPanel
@@ -56,38 +63,23 @@ export function ChatMessage({
             onToggleCollapsed={handleToggleThinkingCollapsed}
           />
         ) : null}
-        <div className="rounded-2xl px-4 py-3 text-[13px] md:text-sm leading-relaxed bg-neutral-dark border border-neutral-border text-slate-200 rounded-tl-none">
-          {hasAssistantContent ? (
+        <div
+          className={`rounded-2xl px-4 py-3 text-[13px] md:text-sm leading-relaxed rounded-tl-none ${
+            errorText
+              ? 'bg-rose-500/10 border border-rose-500/40 text-rose-200'
+              : 'bg-neutral-dark border border-neutral-border text-slate-200'
+          }`}
+        >
+          {errorText ? (
+            <p role="alert" className="flex items-start gap-2">
+              <span className="material-symbols-outlined text-base text-rose-400 shrink-0">error</span>
+              <span>{errorText}</span>
+            </p>
+          ) : hasAssistantContent ? (
             <div className="prose prose-sm prose-invert max-w-none prose-p:my-0 prose-headings:my-0">
-              <ReactMarkdown
-                components={{
-                  h2: ({ children }) => (
-                    <h2 className="text-sm font-semibold text-slate-100 mt-3 mb-1 border-b border-neutral-border pb-1">
-                      {children}
-                    </h2>
-                  ),
-                  p: ({ children }) => <p className="text-sm leading-relaxed mb-2 text-slate-200">{children}</p>,
-                  ul: ({ children }) => <ul className="text-sm space-y-1 ml-3 mb-2">{children}</ul>,
-                  li: ({ children }) => (
-                    <li className="flex gap-2 before:content-['·'] before:text-slate-500 text-slate-200">
-                      {children}
-                    </li>
-                  ),
-                  strong: ({ children }) => <span className="font-semibold text-slate-100">{children}</span>,
-                  a: ({ href, children }) => (
-                    <a
-                      href={href}
-                      target="_blank"
-                      rel="noreferrer noopener"
-                      className="text-blue-400 underline underline-offset-2 hover:text-blue-300"
-                    >
-                      {children}
-                    </a>
-                  ),
-                }}
-              >
-                {message.content}
-              </ReactMarkdown>
+              <Suspense fallback={<span className="whitespace-pre-wrap">{message.content}</span>}>
+                <MarkdownContent content={message.content} toolUrls={toolUrls} />
+              </Suspense>
             </div>
           ) : (
             <span className="inline-flex gap-1 items-center text-slate-400">

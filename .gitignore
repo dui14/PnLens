@@ -1,51 +1,69 @@
 # Dependencies
 node_modules/
+.pnpm-store/
 
-# Next.js
+# Next.js build output
 src/.next/
-src/tsconfig.tsbuildinfo
+src/out/
+src/build/
+*.tsbuildinfo
 
-# Env
+# Local debug scripts
+src/scripts/
+
+# Test output
+coverage/
+test-results/
+playwright-report/
+
+# Env and secrets
 .env
 .env.*
+!.env.example
 keydata.env
-src/.env
-src/.env.*
-supabase/
+*.pem
 
-# Local tooling
-.vscode/
+# Supabase project files (local only)
+/supabase/
+
+# Local-only context and docs (repo root only)
+/ai-context/
+/database/
+/diagram/
+/.agents/
+/AGENTS.md
+/.github/copilot-instructions.md
+/spec/
+/docs/
+/tests/
+
+# AI and editor tooling
+.claude/
+.codegraph/
+.playwright-mcp/
 .cursor/
+.vscode/
+.mcp.json
 mcp.json
 **/*mcp.json
+CLAUDE.md
+CLAUDE.local.md
 
-# Context 
-ai-context/
-database/
-diagram/
-.agents/
-AGENTS.md
-.github/copilot-instructions.md
-spec/ 
-# Tests under src
-src/**/__tests__/
-src/**/test/
-src/**/tests/
-src/**/*.test.ts
-src/**/*.test.tsx
-src/**/*.spec.ts
-src/**/*.spec.tsx
-
-# Markdown, keep the two published docs
+# Markdown
 **/*.md
 !README.md
-!docs/ARCHITECTURE.md
+!/ARCHITECTURE.md
+!/CONTRIBUTING.md
 
-# OS
-Thumbs.db
-desktop.ini
-.DS_Store
-
-# Tool logs
+# Logs
+*.log
 pnpm-debug.log*
 npm-debug.log*
+
+# Deploy tooling
+.vercel/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini

@@ -1,6 +1,9 @@
 import { createServerClient, type CookieOptions } from '@supabase/ssr'
 import type { EmailOtpType } from '@supabase/supabase-js'
 import { NextResponse, type NextRequest } from 'next/server'
+import { REMEMBER_COOKIE_NAME } from '@/lib/auth/constants'
+import { applyRememberPolicy, isRememberDisabled } from '@/lib/auth/rememberPolicy'
+import { resolveSafeNextPath } from '@/lib/security/safeNextPath'
 
 function getAppOrigin(request: NextRequest): string {
   const appUrl = process.env.NEXT_PUBLIC_APP_URL
@@ -23,12 +26,13 @@ function getAppOrigin(request: NextRequest): string {
   return new URL(request.url).origin
 }
 
-function getSafeNextPath(searchParams: URLSearchParams): string {
-  const next = searchParams.get('next')
-  if (!next || !next.startsWith('/')) {
-    return '/dashboard'
+const RESET_PASSWORD_PATH = '/reset-password'
+
+function getFailureRedirect(nextPath: string, appOrigin: string): URL {
+  if (nextPath === RESET_PASSWORD_PATH) {
+    return new URL(`${RESET_PASSWORD_PATH}?error=invalid_link`, appOrigin)
   }
-  return next
+  return new URL('/login?error=auth_failed', appOrigin)
 }
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
@@ -37,10 +41,14 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const code = searchParams.get('code')
   const tokenHash = searchParams.get('token_hash')
   const type = searchParams.get('type')
-  const nextPath = getSafeNextPath(searchParams)
+  const nextPath = resolveSafeNextPath(searchParams.get('next'), appOrigin)
 
   if (!code && (!tokenHash || !type)) {
-    return NextResponse.redirect(new URL('/login?error=missing_token', appOrigin))
+    return NextResponse.redirect(
+      nextPath === RESET_PASSWORD_PATH
+        ? getFailureRedirect(nextPath, appOrigin)
+        : new URL('/login?error=missing_token', appOrigin)
+    )
   }
 
   const response = NextResponse.redirect(new URL(nextPath, appOrigin))
@@ -54,8 +62,9 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
           return request.cookies.getAll()
         },
         setAll(cookiesToSet: { name: string; value: string; options: CookieOptions }[]) {
+          const disabled = isRememberDisabled(request.cookies.get(REMEMBER_COOKIE_NAME)?.value)
           cookiesToSet.forEach(({ name, value, options }) =>
-            response.cookies.set(name, value, options)
+            response.cookies.set(name, value, applyRememberPolicy(name, options, disabled))
           )
         },
       },

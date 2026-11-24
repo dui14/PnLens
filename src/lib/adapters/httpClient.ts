@@ -88,15 +88,10 @@ export function normalizeProxyUrl(
 	return normalizeProxyWithoutScheme(raw, fallbackUsername, fallbackPassword)
 }
 
-export function resolveExchangeProxy(proxy?: string | null): string | null {
-	const envProxy = process.env.EXCHANGE_PROXY_URL ?? process.env.EXCHANGE_PROXY
+export function resolveExchangeProxy(_proxy?: string | null): string | null {
+	const envProxy = process.env.EXCHANGE_PROXY_URL
 	const envUsername = process.env.EXCHANGE_PROXY_USERNAME
 	const envPassword = process.env.EXCHANGE_PROXY_PASSWORD
-
-	if (proxy && proxy.trim()) {
-		return normalizeProxyUrl(proxy, envUsername, envPassword)
-	}
-
 	return normalizeProxyUrl(envProxy, envUsername, envPassword)
 }
 

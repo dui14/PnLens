@@ -1,20 +1,27 @@
 'use client'
 
 import Link from 'next/link'
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { createSupabaseBrowserClient } from '@/lib/db/supabase-browser'
+import { writeRememberPreference } from '@/lib/auth/rememberPolicy'
+import { useT } from '@/lib/i18n/client'
+import { AutofillSafeInput } from '@/components/ui/AutofillSafeInput'
+import { AuthCard } from '@/components/features/auth/AuthCard'
+import type { Dictionary } from '@/lib/i18n'
 
-const loginSchema = z.object({
-  email: z.string().email('Please enter a valid email'),
-  password: z.string().min(8, 'Password must be at least 8 characters'),
-  rememberMe: z.boolean().optional(),
-})
+function buildLoginSchema(t: Dictionary) {
+  return z.object({
+    email: z.string().email(t.auth.validation.email),
+    password: z.string().min(8, t.auth.validation.passwordMin),
+    rememberMe: z.boolean().optional(),
+  })
+}
 
-type LoginFormValues = z.infer<typeof loginSchema>
+type LoginFormValues = z.infer<ReturnType<typeof buildLoginSchema>>
 
 function GoogleIcon(): React.JSX.Element {
   return (
@@ -28,7 +35,9 @@ function GoogleIcon(): React.JSX.Element {
 }
 
 export function LoginForm(): React.JSX.Element {
+  const { t } = useT()
   const router = useRouter()
+  const loginSchema = useMemo(() => buildLoginSchema(t), [t])
   const [authError, setAuthError] = useState<string | null>(null)
   const [googleLoading, setGoogleLoading] = useState(false)
 
@@ -43,6 +52,7 @@ export function LoginForm(): React.JSX.Element {
   const handleGoogleSignIn = async (): Promise<void> => {
     setGoogleLoading(true)
     setAuthError(null)
+    writeRememberPreference(true)
     const supabase = createSupabaseBrowserClient()
     const { error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
@@ -62,6 +72,7 @@ export function LoginForm(): React.JSX.Element {
 
   const onSubmit = async (data: LoginFormValues): Promise<void> => {
     setAuthError(null)
+    writeRememberPreference(Boolean(data.rememberMe))
     const supabase = createSupabaseBrowserClient()
     const { error } = await supabase.auth.signInWithPassword({
       email: data.email.trim().toLowerCase(),
@@ -69,7 +80,7 @@ export function LoginForm(): React.JSX.Element {
     })
     if (error) {
       if (error.message.toLowerCase().includes('invalid login credentials')) {
-        setAuthError('Email hoặc mật khẩu không đúng, hoặc tài khoản chưa xác thực email.')
+        setAuthError(t.auth.login.invalidCredentials)
       } else {
         setAuthError(error.message)
       }
@@ -80,19 +91,18 @@ export function LoginForm(): React.JSX.Element {
   }
 
   return (
-    <div className="relative w-full max-w-md p-6 overflow-hidden">
-      <div className="absolute -top-24 -left-24 w-64 h-64 bg-primary/20 rounded-full blur-[100px]" />
-      <div className="absolute -bottom-24 -right-24 w-64 h-64 bg-primary/10 rounded-full blur-[100px]" />
-
-      <div className="relative bg-slate-50 dark:bg-[#121214] border border-slate-200 dark:border-slate-800 shadow-2xl rounded-xl overflow-hidden p-8">
-        <div className="flex flex-col items-center mb-8">
-          <div className="w-12 h-12 bg-primary rounded-lg flex items-center justify-center mb-4 shadow-lg shadow-primary/20">
-            <span className="material-symbols-outlined text-white text-3xl">lock_open</span>
-          </div>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-white">Welcome Back</h1>
-          <p className="text-slate-500 dark:text-slate-400 text-sm mt-1">Please enter your details to sign in</p>
-        </div>
-
+    <AuthCard
+      title={t.auth.login.title}
+      subtitle={t.auth.login.subtitle}
+      footer={
+        <>
+          {t.auth.login.noAccount}{' '}
+          <Link href="/register" className="font-bold text-primary dark:text-accent hover:underline">
+            {t.auth.login.createAccount}
+          </Link>
+        </>
+      }
+    >
         <button
           type="button"
           onClick={handleGoogleSignIn}
@@ -100,7 +110,7 @@ export function LoginForm(): React.JSX.Element {
           className="w-full flex items-center justify-center gap-3 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 py-2.5 rounded-lg text-sm font-semibold hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors mb-6 disabled:opacity-60 disabled:cursor-not-allowed"
         >
           <GoogleIcon />
-          {googleLoading ? 'Redirecting...' : 'Continue with Google'}
+          {googleLoading ? t.auth.login.redirecting : t.auth.continueWithGoogle}
         </button>
 
         <div className="relative mb-6">
@@ -108,8 +118,8 @@ export function LoginForm(): React.JSX.Element {
             <div className="w-full border-t border-slate-200 dark:border-slate-800" />
           </div>
           <div className="relative flex justify-center text-xs uppercase">
-            <span className="bg-slate-50 dark:bg-[#121214] px-2 text-slate-500 dark:text-slate-400">
-              Or continue with email
+            <span className="bg-slate-50 dark:bg-panel-dark px-2 text-slate-500 dark:text-slate-400">
+              {t.auth.login.orContinueWithEmail}
             </span>
           </div>
         </div>
@@ -125,18 +135,18 @@ export function LoginForm(): React.JSX.Element {
               className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5"
               htmlFor="email"
             >
-              Email address
+              {t.auth.emailAddress}
             </label>
             <div className="relative">
               <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
                 <span className="material-symbols-outlined text-accent text-xl opacity-80">mail</span>
               </div>
-              <input
+              <AutofillSafeInput
                 {...register('email')}
                 id="email"
                 type="email"
-                placeholder="name@company.com"
-                autoComplete="email"
+                placeholder={t.auth.login.emailPlaceholder}
+                autoComplete="username"
                 className="block w-full pl-10 pr-3 py-2.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-sm focus:ring-1 focus:ring-primary focus:border-primary transition-all placeholder:text-slate-400 dark:placeholder:text-slate-600"
               />
             </div>
@@ -150,13 +160,13 @@ export function LoginForm(): React.JSX.Element {
               className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5"
               htmlFor="password"
             >
-              Password
+              {t.auth.password}
             </label>
             <div className="relative">
               <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
                 <span className="material-symbols-outlined text-accent text-xl opacity-80">lock</span>
               </div>
-              <input
+              <AutofillSafeInput
                 {...register('password')}
                 id="password"
                 type="password"
@@ -182,14 +192,14 @@ export function LoginForm(): React.JSX.Element {
                 className="ml-2 block text-xs text-slate-600 dark:text-slate-400"
                 htmlFor="remember-me"
               >
-                Remember me
+                {t.auth.login.rememberMe}
               </label>
             </div>
             <Link
               href="/forgot-password"
               className="text-xs font-semibold text-accent hover:text-accent/80 transition-colors"
             >
-              Forgot password?
+              {t.auth.login.forgotPassword}
             </Link>
           </div>
 
@@ -198,17 +208,10 @@ export function LoginForm(): React.JSX.Element {
             disabled={isSubmitting}
             className="w-full flex justify-center py-3 px-4 border border-transparent rounded-lg shadow-sm text-sm font-bold text-white bg-primary hover:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary transition-all mt-4 disabled:opacity-60 disabled:cursor-not-allowed"
           >
-            {isSubmitting ? 'Signing in...' : 'Sign In'}
+            {isSubmitting ? t.auth.login.submitting : t.auth.login.submit}
           </button>
         </form>
 
-        <p className="mt-8 text-center text-xs text-slate-500 dark:text-slate-400">
-          Don&apos;t have an account?{' '}
-          <Link href="/register" className="font-bold text-primary hover:underline">
-            Create an account
-          </Link>
-        </p>
-      </div>
-    </div>
+    </AuthCard>
   )
 }

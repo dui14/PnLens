@@ -1,34 +1,24 @@
+import type { HistoryGap } from './historyGaps'
 import type {
   ExchangeAdapterTrade,
   ExchangeCredentials,
   AssetBalance,
   UnrealizedPosition,
 } from '@/lib/types'
-
-export type CredentialValidationCode =
-  | 'valid'
-  | 'invalid_api_key'
-  | 'region_blocked'
-  | 'unreachable'
-  | 'time_drift'
-
-export type CredentialValidationResult = {
-  ok: boolean
-  code: CredentialValidationCode
-  upstreamStatus?: number | null
-  exchangeCode?: number | string | null
-  message?: string | null
-}
+import type { CredentialProbeResult } from './credentialValidation'
+import type { TradeRejectCounts } from './tradeFields'
 
 export interface ExchangeAdapter {
-  validateCredentials(credentials: ExchangeCredentials): Promise<boolean>
-  validateCredentialsDetailed?(
-    credentials: ExchangeCredentials
-  ): Promise<CredentialValidationResult>
+  validateCredentials(credentials: ExchangeCredentials): Promise<CredentialProbeResult>
   hasWithdrawPermission(credentials: ExchangeCredentials): Promise<boolean>
+  rejectedTradeCounts(): TradeRejectCounts
+  historyGaps?(): HistoryGap[]
+  setSpotResume?(resolver: (symbol: string, beforeMs: number) => Promise<number>): void
+  setKnownSpotSymbols?(symbols: string[]): void
   fetchTrades(
     credentials: ExchangeCredentials,
-    since?: Date
+    since?: Date,
+    until?: Date
   ): Promise<ExchangeAdapterTrade[]>
   fetchOpenPositions(
     credentials: ExchangeCredentials

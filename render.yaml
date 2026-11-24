@@ -1,16 +1,18 @@
 services:
   - type: web
-    name: ai-track-profit
+    name: pnlens
     runtime: node
-    rootDir: src
+    region: singapore
     plan: free
+    branch: main
+    rootDir: src
     autoDeploy: true
-    buildCommand: pnpm install --frozen-lockfile && pnpm build
+    buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm build
     startCommand: pnpm start
     healthCheckPath: /api/healthz
     envVars:
       - key: NODE_VERSION
-        value: 20
+        value: 22
       - key: NODE_ENV
         value: production
       - key: NEXT_PUBLIC_APP_URL
@@ -23,17 +25,3 @@ services:
         sync: false
       - key: ENCRYPTION_MASTER_KEY
         sync: false
-      - key: OPENROUTER_API_KEY
-        sync: false
-      - key: MODELS_QWEN
-        value: qwen/qwen3.5-9b
-      - key: MODELS_CLAUDE
-        value: anthropic/claude-haiku-4.5
-      - key: MODELS_GEMINI
-        value: google/gemini-3-flash-preview
-      - key: MODELS_GROK
-        value: x-ai/grok-4.1-fast
-      - key: MODELS_DEEPSEEK
-        value: deepseek/deepseek-v3.2
-      - key: MODELS_GPT
-        value: openai/gpt-5.4

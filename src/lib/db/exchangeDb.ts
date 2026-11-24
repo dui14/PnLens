@@ -1,10 +1,14 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
-import type { ExchangeAccount, ApiKeyRow, ExchangeAccountWithStats } from '@/lib/types'
+import { SECRET_FORMATS, type ExchangeAccount, type ApiKeyRow, type ExchangeAccountWithStats, type SecretFormat } from '@/lib/types'
 
 function hasMissingColumnError(error: unknown, column: string): boolean {
   if (!error || typeof error !== 'object') return false
   const message = 'message' in error ? String(error.message ?? '') : ''
   return message.includes(column) && message.toLowerCase().includes('column')
+}
+
+function secretFormatOf(value: unknown): SecretFormat | null {
+  return (SECRET_FORMATS as readonly unknown[]).includes(value) ? (value as SecretFormat) : null
 }
 
 function normalizeExchangeAccount(row: Record<string, unknown>, userId: string): ExchangeAccount {
@@ -25,6 +29,7 @@ function normalizeExchangeAccount(row: Record<string, unknown>, userId: string):
     is_active: Boolean(row.is_active),
     sync_status: syncStatus,
     sync_error: syncError,
+    sync_started_at: typeof row.sync_started_at === 'string' ? row.sync_started_at : null,
     last_synced: typeof row.last_synced === 'string' ? row.last_synced : null,
     created_at: typeof row.created_at === 'string' ? row.created_at : new Date().toISOString(),
   }
@@ -70,12 +75,14 @@ export async function createApiKey(
   passphraseEncrypted: string | null,
   passphraseIv: string | null,
   proxyEncrypted: string | null,
-  proxyIv: string | null
+  proxyIv: string | null,
+  secretFormat: SecretFormat
 ): Promise<boolean> {
   let includePassphrase = true
   let includeProxy = true
+  let includeSecretFormat = true
 
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
     const payload: Record<string, unknown> = {
       exchange_account_id: exchangeAccountId,
       key_encrypted: keyEncrypted,
@@ -94,8 +101,14 @@ export async function createApiKey(
       payload.proxy_iv = proxyIv
     }
 
+    if (includeSecretFormat) {
+      payload.secret_format = secretFormat
+    }
+
     const result = await supabase.from('api_keys').insert(payload)
     if (!result.error) return true
+
+    const missingSecretFormatColumn = hasMissingColumnError(result.error, 'secret_format')
 
     const missingPassphraseColumn =
       hasMissingColumnError(result.error, 'passphrase_encrypted') ||
@@ -105,8 +118,12 @@ export async function createApiKey(
       hasMissingColumnError(result.error, 'proxy_encrypted') ||
       hasMissingColumnError(result.error, 'proxy_iv')
 
-    if (!missingPassphraseColumn && !missingProxyColumn) {
+    if (!missingPassphraseColumn && !missingProxyColumn && !missingSecretFormatColumn) {
       return false
+    }
+
+    if (missingSecretFormatColumn) {
+      includeSecretFormat = false
     }
 
     if (missingPassphraseColumn) {
@@ -133,13 +150,15 @@ export async function getExchangeAccounts(
 
   if (!primary.error && primary.data) {
     return primary.data.map((row) => {
-      const tradeRows = Array.isArray(row.trades) ? row.trades : []
-      const keyRows = Array.isArray(row.api_keys) ? row.api_keys : []
+      const record = row as unknown as Record<string, unknown>
+      const tradeRows = Array.isArray(record.trades) ? record.trades : []
+      const keyRows = (Array.isArray(record.api_keys) ? record.api_keys : []) as Record<string, unknown>[]
 
       return {
-        ...normalizeExchangeAccount(row as unknown as Record<string, unknown>, userId),
+        ...normalizeExchangeAccount(record, userId),
         trade_count: tradeRows.length,
         has_passphrase: keyRows.some((keyRow) => Boolean(keyRow.passphrase_encrypted)),
+        secret_format: null,
       }
     }) as ExchangeAccountWithStats[]
   }
@@ -159,8 +178,45 @@ export async function getExchangeAccounts(
       ...normalizeExchangeAccount(row as unknown as Record<string, unknown>, userId),
       trade_count: tradeRows.length,
       has_passphrase: false,
+      secret_format: null,
     }
   }) as ExchangeAccountWithStats[]
+}
+
+export type ApiKeyMetadata = {
+  secret_format: SecretFormat | null
+  has_passphrase: boolean
+}
+
+export async function getApiKeyMetadata(
+  serviceSupabase: SupabaseClient,
+  exchangeAccountIds: string[]
+): Promise<Map<string, ApiKeyMetadata>> {
+  const metadata = new Map<string, ApiKeyMetadata>()
+  if (exchangeAccountIds.length === 0) return metadata
+
+  const withFormat = await serviceSupabase
+    .from('api_keys')
+    .select('exchange_account_id, passphrase_iv, secret_format')
+    .in('exchange_account_id', exchangeAccountIds)
+
+  const result = withFormat.error && hasMissingColumnError(withFormat.error, 'secret_format')
+    ? await serviceSupabase
+        .from('api_keys')
+        .select('exchange_account_id, passphrase_iv')
+        .in('exchange_account_id', exchangeAccountIds)
+    : withFormat
+
+  if (result.error || !result.data) return metadata
+
+  for (const row of result.data as Record<string, unknown>[]) {
+    metadata.set(String(row.exchange_account_id), {
+      secret_format: secretFormatOf(row.secret_format),
+      has_passphrase: typeof row.passphrase_iv === 'string' && row.passphrase_iv.length > 0,
+    })
+  }
+
+  return metadata
 }
 
 export async function getExchangeAccountById(
@@ -200,11 +256,11 @@ export async function getApiKey(
     secret_encrypted: String(data.secret_encrypted),
     passphrase_encrypted:
       typeof data.passphrase_encrypted === 'string' ? data.passphrase_encrypted : null,
-    proxy_encrypted: typeof data.proxy_encrypted === 'string' ? data.proxy_encrypted : null,
+    proxy_encrypted: null,
     key_iv: String(data.key_iv),
     secret_iv: String(data.secret_iv),
     passphrase_iv: typeof data.passphrase_iv === 'string' ? data.passphrase_iv : null,
-    proxy_iv: typeof data.proxy_iv === 'string' ? data.proxy_iv : null,
+    proxy_iv: null,
     key_version: typeof data.key_version === 'number' ? data.key_version : 1,
     created_at: String(data.created_at),
   }
@@ -237,6 +293,84 @@ export async function updateLastSynced(
       .update({ last_synced: new Date().toISOString() })
       .eq('id', accountId)
   }
+}
+
+export type ScanClaimResult = 'claimed' | 'not_found' | 'inactive' | 'in_progress' | 'rate_limited'
+
+export async function getExchangeAccountByAccountId(
+  supabase: SupabaseClient,
+  accountId: string
+): Promise<ExchangeAccount | null> {
+  const { data, error } = await supabase
+    .from('exchange_accounts')
+    .select('*')
+    .eq('id', accountId)
+    .maybeSingle()
+
+  if (error || !data) return null
+  return normalizeExchangeAccount(data as unknown as Record<string, unknown>, String(data.user_id ?? ''))
+}
+
+export async function claimExchangeScan(
+  supabase: SupabaseClient,
+  accountId: string,
+  userId: string,
+  nowIso: string,
+  cooldownBeforeIso: string,
+  staleBeforeIso: string
+): Promise<ScanClaimResult> {
+  const existing = await getExchangeAccountById(supabase, accountId, userId)
+  if (!existing) return 'not_found'
+  if (!existing.is_active) return 'inactive'
+
+  const claimed = await updateScanClaim(supabase, accountId, userId, nowIso, cooldownBeforeIso, staleBeforeIso)
+  if (claimed === 'claimed') return 'claimed'
+  if (claimed === 'missing_column') {
+    const fallback = await supabase
+      .from('exchange_accounts')
+      .update({ sync_status: 'syncing', sync_error: null })
+      .eq('id', accountId)
+      .eq('user_id', userId)
+      .eq('is_active', true)
+      .neq('sync_status', 'syncing')
+      .or(`last_synced.is.null,last_synced.lte."${cooldownBeforeIso}"`)
+      .select('id')
+    if (!fallback.error && (fallback.data?.length ?? 0) > 0) return 'claimed'
+  }
+
+  const latest = await getExchangeAccountById(supabase, accountId, userId)
+  if (!latest) return 'not_found'
+  if (!latest.is_active) return 'inactive'
+  if (latest.sync_status === 'syncing') return 'in_progress'
+  return 'rate_limited'
+}
+
+async function updateScanClaim(
+  supabase: SupabaseClient,
+  accountId: string,
+  userId: string,
+  nowIso: string,
+  cooldownBeforeIso: string,
+  staleBeforeIso: string
+): Promise<'claimed' | 'empty' | 'missing_column'> {
+  const result = await supabase
+    .from('exchange_accounts')
+    .update({
+      sync_status: 'syncing',
+      sync_error: null,
+      sync_started_at: nowIso,
+    })
+    .eq('id', accountId)
+    .eq('user_id', userId)
+    .eq('is_active', true)
+    .or(
+      `and(sync_status.neq.syncing,or(last_synced.is.null,last_synced.lte."${cooldownBeforeIso}")),and(sync_status.eq.syncing,sync_started_at.lte."${staleBeforeIso}")`
+    )
+    .select('id')
+
+  if (result.error && hasMissingColumnError(result.error, 'sync_started_at')) return 'missing_column'
+  if (result.error) return 'empty'
+  return (result.data?.length ?? 0) > 0 ? 'claimed' : 'empty'
 }
 
 export async function updateSyncStatus(
@@ -297,11 +431,10 @@ export async function updateApiKeyRecord(
   secretIv: string,
   passphraseEncrypted: string | null,
   passphraseIv: string | null,
-  proxyEncrypted: string | null,
-  proxyIv: string | null
+  secretFormat: SecretFormat
 ): Promise<boolean> {
   let includePassphrase = true
-  let includeProxy = true
+  let includeSecretFormat = true
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const payload: Record<string, unknown> = {
@@ -316,9 +449,8 @@ export async function updateApiKeyRecord(
       payload.passphrase_iv = passphraseIv
     }
 
-    if (includeProxy) {
-      payload.proxy_encrypted = proxyEncrypted
-      payload.proxy_iv = proxyIv
+    if (includeSecretFormat) {
+      payload.secret_format = secretFormat
     }
 
     const result = await supabase
@@ -331,22 +463,11 @@ export async function updateApiKeyRecord(
     const missingPassphraseColumn =
       hasMissingColumnError(result.error, 'passphrase_encrypted') ||
       hasMissingColumnError(result.error, 'passphrase_iv')
+    const missingSecretFormatColumn = hasMissingColumnError(result.error, 'secret_format')
 
-    const missingProxyColumn =
-      hasMissingColumnError(result.error, 'proxy_encrypted') ||
-      hasMissingColumnError(result.error, 'proxy_iv')
-
-    if (!missingPassphraseColumn && !missingProxyColumn) {
-      return false
-    }
-
-    if (missingPassphraseColumn) {
-      includePassphrase = false
-    }
-
-    if (missingProxyColumn) {
-      includeProxy = false
-    }
+    if (!missingPassphraseColumn && !missingSecretFormatColumn) return false
+    if (missingPassphraseColumn) includePassphrase = false
+    if (missingSecretFormatColumn) includeSecretFormat = false
   }
 
   return false

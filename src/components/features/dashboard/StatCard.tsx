@@ -7,6 +7,7 @@ type StatCardProps = {
   progressBar?: number
   note?: string
   valueHighlight?: boolean
+  control?: React.ReactNode
 }
 
 export function StatCard({
@@ -18,6 +19,7 @@ export function StatCard({
   progressBar,
   note,
   valueHighlight,
+  control,
 }: StatCardProps): React.JSX.Element {
   return (
     <div className="bg-background-light dark:bg-background-dark p-4 sm:p-6 rounded-xl border border-slate-200 dark:border-primary/20 flex flex-col justify-between shadow-sm">
@@ -25,6 +27,7 @@ export function StatCard({
         <p className="text-xs sm:text-sm font-medium text-slate-500 pr-3">{title}</p>
         <span className="material-symbols-outlined text-primary text-xl">{icon}</span>
       </div>
+      {control && <div className="mt-3">{control}</div>}
       <div className="mt-4">
         <h3
           className={`text-xl sm:text-2xl font-bold tracking-tight break-words ${

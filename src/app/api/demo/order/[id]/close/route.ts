@@ -1,7 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createSupabaseServerClient } from '@/lib/db/supabase-server'
-import { CloseDemoOrderSchema } from '@/lib/validators/demo'
+import { CloseDemoOrderBodySchema, DemoTradeIdParamSchema } from '@/lib/validators/demo'
 import { closeDemoOrder } from '@/lib/services/demoService'
+import { DEMO_ERROR_STATUS } from '@/lib/config/demoTrading'
+
+function failure(code: string): NextResponse {
+  return NextResponse.json(
+    { success: false, data: null, error: code },
+    { status: DEMO_ERROR_STATUS[code] ?? DEMO_ERROR_STATUS.INTERNAL_ERROR }
+  )
+}
 
 export async function POST(
   req: NextRequest,
@@ -12,45 +20,28 @@ export async function POST(
     data: { user },
   } = await supabase.auth.getUser()
 
-  if (!user) {
-    return NextResponse.json(
-      { success: false, data: null, error: 'UNAUTHORIZED' },
-      { status: 401 }
-    )
-  }
+  if (!user) return failure('UNAUTHORIZED')
 
-  let body: unknown
+  let body: unknown = {}
   try {
     body = await req.json()
   } catch {
-    return NextResponse.json(
-      { success: false, data: null, error: 'VALIDATION_ERROR' },
-      { status: 400 }
-    )
+    body = {}
   }
 
-  const parsed = CloseDemoOrderSchema.safeParse(body)
-  if (!parsed.success) {
-    return NextResponse.json(
-      { success: false, data: null, error: 'VALIDATION_ERROR' },
-      { status: 400 }
-    )
-  }
+  const parsedBody = CloseDemoOrderBodySchema.safeParse(body)
+  const parsedParams = DemoTradeIdParamSchema.safeParse(await params)
+  if (!parsedBody.success || !parsedParams.success) return failure('VALIDATION_ERROR')
 
-  const { id } = await params
-  const result = await closeDemoOrder(supabase, user.id, id, parsed.data.exitPrice)
+  const result = await closeDemoOrder(
+    supabase,
+    user.id,
+    parsedParams.data.id,
+    parsedBody.data.closeQuantity,
+    { orderType: parsedBody.data.orderType, price: parsedBody.data.price }
+  )
 
-  if (!result.success) {
-    const statusMap: Record<string, number> = {
-      NOT_FOUND: 404,
-      TRADE_NOT_OPEN: 400,
-      INTERNAL_ERROR: 500,
-    }
-    return NextResponse.json(
-      { success: false, data: null, error: result.error },
-      { status: statusMap[result.error] ?? 500 }
-    )
-  }
+  if (!result.success) return failure(result.error)
 
   return NextResponse.json({ success: true, data: result.data, error: null })
 }

@@ -70,7 +70,8 @@ export async function createChatMessage(
   role: 'user' | 'assistant' | 'system',
   content: string,
   tokensUsed?: number,
-  analysisMeta?: ChatMessageAnalysisMeta | null
+  analysisMeta?: ChatMessageAnalysisMeta | null,
+  errorCode?: string | null
 ): Promise<ChatMessage | null> {
   const { data, error } = await supabase
     .from('chat_messages')
@@ -80,6 +81,8 @@ export async function createChatMessage(
       content,
       tokens_used: tokensUsed ?? null,
       analysis_meta: analysisMeta ?? null,
+      status: errorCode ? 'error' : 'ok',
+      error_code: errorCode ?? null,
     })
     .select()
     .single()
@@ -97,6 +100,23 @@ export async function updateConversationTitle(
     .from('chat_conversations')
     .update({ title })
     .eq('id', conversationId)
+}
+
+export async function renameConversation(
+  supabase: SupabaseClient,
+  conversationId: string,
+  userId: string,
+  title: string
+): Promise<boolean> {
+  const { data, error } = await supabase
+    .from('chat_conversations')
+    .update({ title })
+    .eq('id', conversationId)
+    .eq('user_id', userId)
+    .select('id')
+
+  if (error) return false
+  return (data?.length ?? 0) > 0
 }
 
 export async function deleteConversation(

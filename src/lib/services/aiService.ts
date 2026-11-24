@@ -1,5 +1,7 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 import type {
+  AiEffort,
+  AiProvider,
   AgentAnalysisStep,
   AgentReferenceLink,
   ChatConversation,
@@ -15,8 +17,18 @@ import {
   createChatMessage,
   updateConversationTitle,
   deleteConversation,
+  renameConversation,
 } from '@/lib/db/chatDb'
+import { classifyAiError, type AiChatErrorCode } from '@/lib/ai/chatErrors'
+import {
+  recordProviderFailure,
+  recordProviderSuccess,
+  resolveChatCredentials,
+} from '@/lib/services/aiProviderService'
 import { runAgentLoop, type AgentEvent } from '@/lib/agent-loop'
+import { AI_VALIDATION_ERROR_CODE, isValidChatMessage, limitHistory } from '@/lib/ai/guardrails'
+import { getDictionaryFor } from '@/lib/i18n'
+import { DEFAULT_LOCALE, type Locale } from '@/lib/i18n/locales'
 
 type StreamCallback = (event: AgentEvent) => void
 
@@ -25,7 +37,7 @@ function emitServiceError(
   message: string,
   conversationId?: string
 ): void {
-  const payload: Record<string, unknown> = { message }
+  const payload: Record<string, unknown> = { message, code: message }
   if (conversationId) {
     payload.conversationId = conversationId
   }
@@ -42,7 +54,7 @@ function readText(value: unknown): string | null {
   return trimmed.length > 0 ? trimmed : null
 }
 
-function readReferenceLinks(value: unknown): AgentReferenceLink[] | undefined {
+function readReferenceLinks(value: unknown, locale: Locale): AgentReferenceLink[] | undefined {
   if (!Array.isArray(value)) return undefined
 
   const links: AgentReferenceLink[] = []
@@ -58,7 +70,7 @@ function readReferenceLinks(value: unknown): AgentReferenceLink[] | undefined {
     }
 
     links.push({
-      title: readText(record.title) ?? 'Chi tiet',
+      title: readText(record.title) ?? getDictionaryFor(locale).ai.progress.newsLinkTitle,
       url,
       source: readText(record.source) ?? undefined,
     })
@@ -67,14 +79,33 @@ function readReferenceLinks(value: unknown): AgentReferenceLink[] | undefined {
   return links.length > 0 ? links : undefined
 }
 
+async function persistFailedTurn(
+  supabase: SupabaseClient,
+  conversationId: string,
+  code: AiChatErrorCode
+): Promise<void> {
+  const stored = await createChatMessage(supabase, conversationId, 'assistant', code, undefined, null, code)
+  if (!stored) {
+    console.error('[aiService] failed to persist error message:', code)
+  }
+}
+
 export async function startOrContinueChat(
   supabase: SupabaseClient,
   userId: string,
   message: string,
   conversationId: string | null | undefined,
-  model: string | undefined,
-  onEvent: StreamCallback
+  provider: AiProvider,
+  model: string,
+  effort: AiEffort | undefined,
+  onEvent: StreamCallback,
+  locale: Locale = DEFAULT_LOCALE
 ): Promise<Result<{ conversationId: string }>> {
+  if (!isValidChatMessage(message)) {
+    emitServiceError(onEvent, AI_VALIDATION_ERROR_CODE, conversationId ?? undefined)
+    return { success: false, error: AI_VALIDATION_ERROR_CODE }
+  }
+
   let conversation: ChatConversation | null = null
 
   if (conversationId) {
@@ -93,17 +124,33 @@ export async function startOrContinueChat(
   }
 
   const history = await getConversationMessages(supabase, conversation.id, userId)
-  const historyForAgent = history
-    .filter((item) => item.role === 'user' || item.role === 'assistant')
+  const historyForAgent = limitHistory(history
+    .filter((item) => (item.role === 'user' || item.role === 'assistant') && item.status !== 'error')
     .map((item) => ({
       role: item.role as 'user' | 'assistant',
       content: item.content,
-    }))
+    })))
 
   const userMessage = await createChatMessage(supabase, conversation.id, 'user', message)
   if (!userMessage) {
     emitServiceError(onEvent, 'INTERNAL_ERROR', conversation.id)
     return { success: false, error: 'INTERNAL_ERROR' }
+  }
+
+  const turnConversationId = conversation.id
+
+  const failTurn = async (rawError: unknown): Promise<Result<{ conversationId: string }>> => {
+    const code = classifyAiError(rawError)
+    console.error('[aiService] chat turn failed:', rawError)
+    await persistFailedTurn(supabase, turnConversationId, code)
+    await recordProviderFailure(supabase, userId, provider, code)
+    emitServiceError(onEvent, code, turnConversationId)
+    return { success: false, error: code }
+  }
+
+  const credentials = await resolveChatCredentials(supabase, userId, provider, model, effort)
+  if (!credentials.success) {
+    return failTurn(credentials.error)
   }
 
   let assistantContent = ''
@@ -114,7 +161,7 @@ export async function startOrContinueChat(
   const agentResult = await runAgentLoop(
     message,
     historyForAgent,
-    userId,
+    { supabase, userId },
     (event) => {
       if (event.type === 'tool_start') {
         const tool = readText(event.payload.tool)
@@ -133,7 +180,7 @@ export async function startOrContinueChat(
         const tool = readText(event.payload.tool)
         if (tool) {
           const summary = readText(event.payload.summary) ?? undefined
-          const links = readReferenceLinks(event.payload.links)
+          const links = readReferenceLinks(event.payload.links, locale)
           let patched = false
 
           for (let idx = analysisSteps.length - 1; idx >= 0; idx -= 1) {
@@ -172,6 +219,10 @@ export async function startOrContinueChat(
         assistantContent += text
       }
 
+      if (event.type === 'error') {
+        return
+      }
+
       const payload =
         event.type === 'done'
           ? event.payload
@@ -185,12 +236,15 @@ export async function startOrContinueChat(
         payload,
       })
     },
-    model
-  )
+    credentials.data,
+    locale
+  ).catch((error: unknown): Result<never> => ({
+    success: false,
+    error: error instanceof Error ? error.message : String(error),
+  }))
 
   if (!agentResult.success) {
-    console.error('[aiService] runAgentLoop failed:', agentResult.error)
-    return { success: false, error: agentResult.error }
+    return failTurn(agentResult.error)
   }
 
   const finalAssistantContent = assistantContent.trim() || agentResult.data.content
@@ -217,6 +271,8 @@ export async function startOrContinueChat(
     emitServiceError(onEvent, 'INTERNAL_ERROR', conversation.id)
     return { success: false, error: 'INTERNAL_ERROR' }
   }
+
+  await recordProviderSuccess(supabase, userId, provider)
 
   if (history.length === 0) {
     await updateConversationTitle(supabase, conversation.id, message.slice(0, 60))
@@ -260,4 +316,15 @@ export async function removeConversation(
   const deleted = await deleteConversation(supabase, conversationId, userId)
   if (!deleted) return { success: false, error: 'INTERNAL_ERROR' }
   return { success: true, data: null }
+}
+
+export async function renameConversationTitle(
+  supabase: SupabaseClient,
+  userId: string,
+  conversationId: string,
+  title: string
+): Promise<Result<{ id: string; title: string }>> {
+  const renamed = await renameConversation(supabase, conversationId, userId, title)
+  if (!renamed) return { success: false, error: 'NOT_FOUND' }
+  return { success: true, data: { id: conversationId, title } }
 }

@@ -23,6 +23,7 @@ export async function GET(
       NOT_FOUND: 404,
       ACCOUNT_INACTIVE: 400,
       API_KEY_NOT_FOUND: 404,
+      NO_KEY: 404,
       DECRYPTION_FAILED: 500,
     }
 
