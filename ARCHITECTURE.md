@@ -57,9 +57,9 @@ Every scan re-reads the full window rather than syncing incrementally, so missed
 
 ## PNL engine
 
-Dashboard figures are computed from the `trades` table, never taken from exchange-reported PNL.
+Dashboard figures are aggregated by PnLens from the `trades` table with one method for every exchange. For futures, each trade's realized PNL is the exchange's own per-trade value; PnLens does not use any exchange's account-level PNL summary.
 
-- `lib/engines/pnlEngine.ts` produces summaries, chart series, calendars, and fee and volume breakdowns from each trade's realized PNL. Spot PNL is derived by FIFO matching of buys and sells.
+- `lib/engines/pnlEngine.ts` produces summaries, chart series, calendars, and fee and volume breakdowns from each trade's realized PNL. Spot trades are stored with `realized_pnl = null` on purpose: spot assets can be withdrawn to or deposited from external wallets, so PnLens cannot know their cost basis and does not compute spot PNL.
 - Day boundaries are fixed at UTC+7. "Year" means calendar year-to-date in that offset.
 - **Calculate** (`POST /api/pnl/calculate`) enqueues a row in `pnl_calculation_jobs` and runs it in `after()`, writing results to `pnl_snapshots`. The dashboard subscribes to the job row through Supabase Realtime and refreshes when it completes.
 
