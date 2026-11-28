@@ -1,4 +1,5 @@
 import type { AiChatTarget, AiEffort, AiProvider } from '@/lib/types'
+import { TOOL_DEFINITIONS } from '@/lib/tools/definitions'
 import {
   AI_APP_REFERER_FALLBACK,
   AI_APP_TITLE,
@@ -35,7 +36,8 @@ export function buildChatHeaders(provider: AiProvider, apiKey: string): Record<s
 export function buildChatBodyFields(
   target: AiChatTarget,
   temperature: number,
-  maxTokens: number
+  maxTokens: number,
+  toolChoice?: 'auto' | 'none'
 ): Record<string, unknown> {
   const { provider, model, effort } = target
   return {
@@ -43,5 +45,6 @@ export function buildChatBodyFields(
     [AI_COMPLETION_TOKENS_PROVIDERS.includes(provider) ? 'max_completion_tokens' : 'max_tokens']: maxTokens,
     ...(AI_NO_TEMPERATURE_PROVIDERS.includes(provider) ? {} : { temperature }),
     ...buildEffortFields(provider, effort),
+    ...(toolChoice ? { tools: TOOL_DEFINITIONS, tool_choice: toolChoice } : {}),
   }
 }

@@ -2,9 +2,18 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import type { AgentReferenceLink, AiChatTarget, Result } from '@/lib/types'
 import { AI_PROVIDER_CHAT_URLS } from '@/lib/ai/providerConfig'
 import { buildChatBodyFields, buildChatHeaders } from '@/lib/ai/providerRequest'
-import type { ToolName } from '@/lib/tools/definitions'
-import { buildContextMessage, collectContext, planContextTools } from '@/lib/ai/contextCollector'
+import { TOOL_NAMES, type ToolName } from '@/lib/tools/definitions'
 import {
+  buildContextMessage,
+  collectContext,
+  executeToolCall,
+  planContextTools,
+} from '@/lib/ai/contextCollector'
+import { findModelEntry } from '@/lib/ai/modelGating'
+import {
+  AGENT_MAX_TOOL_STEPS,
+  AGENT_TOOL_CHOICE_AUTO,
+  AGENT_TOOL_CHOICE_NONE,
   TOOL_RESULT_TAG,
   TOOL_RESULT_TRUST_LEVEL,
   TOOL_TRADE_LIMIT_MAX,
@@ -27,47 +36,18 @@ const AGENT_MAX_TOKENS = 2048
 const AGENT_SYSTEM_PROMPT = `
 You are PnLens' professional AI trading assistant.
 
-## Data you receive
-Before each answer, a system message provides data blocks collected for this turn: trade history, PNL statistics, and when relevant market quotes and crypto news.
-
-## Mandatory rules
-1. Base every figure on those data blocks. Never invent numbers
-2. If a block is missing or marked unavailable, say so briefly and answer with what you have
-3. Questions about gold/stocks/indices/forex (for example XAUUSD, NVDA) use the market quotes block when present
+## When to use tools
+You can call tools to fetch the user's own PnLens data and live data.
+- Call a tool only when the answer needs the user's own data (PNL, trades, fees), live data (prices, news), or numbers you cannot know.
+- Answer directly, without tools, for greetings, small talk, explanations of concepts, how to use PnLens, and follow-ups about data already in the conversation.
+- If key inputs are missing (for example symbol, timeframe or direction for a trade plan), ask one short clarifying question instead of calling tools to guess.
+- Never invent numbers. If a tool result is unavailable or has an error, say so briefly and answer with what you have.
+- Answer only the parts the user asked. Do not add unrequested sections or a fixed report template.
+- Gold, stocks, indices, forex and major crypto (BTC, ETH, SOL) prices come from get_market_quotes.
 
 ## How to write responses
-
 Do NOT use ### or ** for formatting; the UI handles markdown.
-Be concise and to the point, friendly but professional.
-
-Standard response structure when analyzing trading:
-
----
-OVERVIEW
-[1-2 sentences summarizing the situation, with specific numbers]
-
-YOUR PERFORMANCE
-Win rate: X% | Total PNL: +/-Y USDT | Trades: Z
-Best trade: [symbol] +X USDT
-Worst trade: [symbol] -Y USDT
-
-SPECIFIC MISTAKES (if there are losses)
-[Analyze the mistake pattern: wrong entry, wrong exit, or wrong timing]
-[Use real numbers from the trade history]
-
-MARKET TODAY
-[The 2-3 most important news points, with links if available]
-
-RECOMMENDATION
-[A clear decision: SHOULD / SHOULD NOT trade today]
-[Specific reasons based on data, not generalities]
-[Suggested entry point if SHOULD]
----
-
-If the user asks something short (for example "how is BTC"), answer only the relevant part;
-the full 5 sections are not required. Prefer concise and useful over complete but empty.
-
-When the user asks about XAUUSD or NVDA, use the market quotes block when present.
+Be concise and to the point, friendly but professional. Use specific numbers from tool results when you give figures.
 
 ## Scope
 You only help with: the user's own trading data in PnLens, PNL, fee and volume analysis, crypto and market information and news, and how to use PnLens.
@@ -107,10 +87,16 @@ export type AgentEvent = {
   payload: Record<string, unknown>
 }
 
-type OpenRouterMessage = {
-  role: 'system' | 'user' | 'assistant'
-  content: string
+type OpenRouterToolCall = {
+  id: string
+  type: 'function'
+  function: { name: string; arguments: string }
 }
+
+type OpenRouterMessage =
+  | { role: 'system' | 'user'; content: string }
+  | { role: 'assistant'; content: string | null; tool_calls?: OpenRouterToolCall[] }
+  | { role: 'tool'; tool_call_id: string; content: string }
 
 type OpenRouterResponse = {
   choices?: Array<{
@@ -118,6 +104,7 @@ type OpenRouterResponse = {
     message?: {
       role: 'assistant'
       content?: string | null
+      tool_calls?: OpenRouterToolCall[]
     }
   }>
   usage?: {
@@ -277,6 +264,46 @@ async function emitByWords(content: string, onEvent: (event: AgentEvent) => void
   }
 }
 
+function emitToolDone(
+  onEvent: (event: AgentEvent) => void,
+  locale: Locale,
+  tool: ToolName,
+  args: Record<string, unknown>,
+  resultOrNull: Record<string, unknown> | null
+): void {
+  const result = resultOrNull ?? {}
+  const links =
+    tool === 'get_crypto_news'
+      ? buildNewsToolLinks(result, locale)
+      : tool === 'get_market_quotes'
+        ? buildMarketToolLinks(result, locale)
+        : []
+
+  onEvent({
+    type: 'tool_done',
+    payload: {
+      tool,
+      summary: buildDoneSummary(locale, tool, args, result),
+      links: links.length > 0 ? links : undefined,
+    },
+  })
+}
+
+function parseArgsForDisplay(raw: string): Record<string, unknown> {
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {}
+  } catch {
+    return {}
+  }
+}
+
+function supportsNativeTools(credentials: AiChatTarget): boolean {
+  return findModelEntry(credentials.provider, credentials.model)?.supportsTools !== false
+}
+
 export async function runAgentLoop(
   userMessage: string,
   history: AgentHistoryMessage[],
@@ -287,6 +314,7 @@ export async function runAgentLoop(
 ): Promise<Result<{ content: string; tokensUsed: number }>> {
   const { provider, apiKey } = credentials
   const chatUrl = AI_PROVIDER_CHAT_URLS[provider]
+  const nativeTools = supportsNativeTools(credentials)
 
   const messages: OpenRouterMessage[] = [
     { role: 'system', content: buildAgentSystemPrompt(locale) },
@@ -303,99 +331,136 @@ export async function runAgentLoop(
     },
   })
 
-  const plans = planContextTools(userMessage)
-  for (const plan of plans) {
-    onEvent({
-      type: 'tool_start',
-      payload: {
-        tool: plan.tool,
-        args: plan.args,
-        label: buildStartLabel(locale, plan.tool, plan.args),
-      },
+  if (!nativeTools) {
+    const plans = planContextTools(userMessage)
+    for (const plan of plans) {
+      onEvent({
+        type: 'tool_start',
+        payload: {
+          tool: plan.tool,
+          args: plan.args,
+          label: buildStartLabel(locale, plan.tool, plan.args),
+        },
+      })
+    }
+
+    const outcomes = await collectContext(context, plans)
+    for (const outcome of outcomes) {
+      emitToolDone(onEvent, locale, outcome.plan.tool, outcome.plan.args, outcome.result)
+    }
+
+    if (outcomes.length > 0) {
+      messages.splice(messages.length - 1, 0, {
+        role: 'system',
+        content: buildContextMessage(outcomes),
+      })
+    }
+  }
+
+  for (let step = 0; step <= AGENT_MAX_TOOL_STEPS; step += 1) {
+    const forceText = nativeTools && step === AGENT_MAX_TOOL_STEPS
+    const toolChoice = nativeTools
+      ? forceText
+        ? AGENT_TOOL_CHOICE_NONE
+        : AGENT_TOOL_CHOICE_AUTO
+      : undefined
+
+    const response = await fetch(chatUrl, {
+      method: 'POST',
+      headers: buildChatHeaders(provider, apiKey),
+      body: JSON.stringify({
+        ...buildChatBodyFields(credentials, AGENT_TEMPERATURE, AGENT_MAX_TOKENS, toolChoice),
+        messages,
+      }),
     })
-  }
 
-  const outcomes = await collectContext(context, plans)
+    if (!response.ok) {
+      const errorText = await response.text()
+      const errorMessage = `AI_REQUEST_FAILED:${response.status}:${errorText.slice(0, 180)}`
+      emitError(onEvent, errorMessage)
+      return { success: false, error: errorMessage }
+    }
 
-  for (const outcome of outcomes) {
-    const { tool, args } = outcome.plan
-    const result = outcome.result ?? {}
-    const links =
-      tool === 'get_crypto_news'
-        ? buildNewsToolLinks(result, locale)
-        : tool === 'get_market_quotes'
-          ? buildMarketToolLinks(result, locale)
-          : []
+    const payload = (await response.json()) as OpenRouterResponse
+    const usageTokens = payload.usage?.total_tokens
+    if (typeof usageTokens === 'number' && Number.isFinite(usageTokens)) {
+      tokensUsed += usageTokens
+    }
 
+    const choice = payload.choices?.[0]
+    const assistantMessage = choice?.message
+
+    if (!assistantMessage) {
+      emitError(onEvent, 'AI_EMPTY_RESPONSE')
+      return { success: false, error: 'AI_EMPTY_RESPONSE' }
+    }
+
+    const toolCalls = nativeTools && !forceText ? (assistantMessage.tool_calls ?? []) : []
+
+    if (toolCalls.length > 0) {
+      messages.push({
+        role: 'assistant',
+        content: assistantMessage.content ?? null,
+        tool_calls: toolCalls,
+      })
+
+      for (const call of toolCalls) {
+        const name = call.function?.name ?? ''
+        const rawArguments = call.function?.arguments ?? ''
+        const displayArgs = parseArgsForDisplay(rawArguments)
+        const knownTool = (TOOL_NAMES as readonly string[]).includes(name)
+
+        if (knownTool) {
+          onEvent({
+            type: 'tool_start',
+            payload: {
+              tool: name,
+              args: displayArgs,
+              label: buildStartLabel(locale, name as ToolName, displayArgs),
+            },
+          })
+        }
+
+        const outcome = await executeToolCall(context, name, rawArguments)
+
+        if (outcome.tool) {
+          emitToolDone(onEvent, locale, outcome.tool, displayArgs, outcome.result)
+        }
+
+        messages.push({ role: 'tool', tool_call_id: call.id, content: outcome.payload })
+      }
+
+      continue
+    }
+
+    const finalContent = (assistantMessage.content ?? '').trim()
+    if (!finalContent) {
+      emitError(onEvent, 'ASSISTANT_EMPTY_CONTENT')
+      return { success: false, error: 'ASSISTANT_EMPTY_CONTENT' }
+    }
+
+    const finishReason = choice?.finish_reason
+    if (finishReason && !ACCEPTED_FINISH_REASONS.includes(finishReason)) {
+      const errorMessage = `ASSISTANT_UNEXPECTED_FINISH_REASON:${finishReason}`
+      emitError(onEvent, errorMessage)
+      return { success: false, error: errorMessage }
+    }
+
+    await emitByWords(finalContent, onEvent)
     onEvent({
-      type: 'tool_done',
-      payload: {
-        tool,
-        summary: buildDoneSummary(locale, tool, args, result),
-        links: links.length > 0 ? links : undefined,
-      },
+      type: 'done',
+      payload: {},
     })
+
+    return {
+      success: true,
+      data: {
+        content: finalContent,
+        tokensUsed,
+      },
+    }
   }
 
-  messages.splice(messages.length - 1, 0, {
-    role: 'system',
-    content: buildContextMessage(outcomes),
-  })
-
-  const response = await fetch(chatUrl, {
-    method: 'POST',
-    headers: buildChatHeaders(provider, apiKey),
-    body: JSON.stringify({
-      ...buildChatBodyFields(credentials, AGENT_TEMPERATURE, AGENT_MAX_TOKENS),
-      messages,
-    }),
-  })
-
-  if (!response.ok) {
-    const errorText = await response.text()
-    const errorMessage = `AI_REQUEST_FAILED:${response.status}:${errorText.slice(0, 180)}`
-    emitError(onEvent, errorMessage)
-    return { success: false, error: errorMessage }
-  }
-
-  const payload = (await response.json()) as OpenRouterResponse
-  const usageTokens = payload.usage?.total_tokens
-  if (typeof usageTokens === 'number' && Number.isFinite(usageTokens)) {
-    tokensUsed = usageTokens
-  }
-
-  const choice = payload.choices?.[0]
-  const assistantMessage = choice?.message
-
-  if (!assistantMessage) {
-    emitError(onEvent, 'AI_EMPTY_RESPONSE')
-    return { success: false, error: 'AI_EMPTY_RESPONSE' }
-  }
-
-  const finalContent = (assistantMessage.content ?? '').trim()
-  if (!finalContent) {
-    emitError(onEvent, 'ASSISTANT_EMPTY_CONTENT')
-    return { success: false, error: 'ASSISTANT_EMPTY_CONTENT' }
-  }
-
-  const finishReason = choice?.finish_reason
-  if (finishReason && !ACCEPTED_FINISH_REASONS.includes(finishReason)) {
-    const errorMessage = `ASSISTANT_UNEXPECTED_FINISH_REASON:${finishReason}`
-    emitError(onEvent, errorMessage)
-    return { success: false, error: errorMessage }
-  }
-
-  await emitByWords(finalContent, onEvent)
-  onEvent({
-    type: 'done',
-    payload: {},
-  })
-
-  return {
-    success: true,
-    data: {
-      content: finalContent,
-      tokensUsed,
-    },
-  }
+  emitError(onEvent, 'AI_EMPTY_RESPONSE')
+  return { success: false, error: 'AI_EMPTY_RESPONSE' }
 }

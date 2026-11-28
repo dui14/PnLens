@@ -19,7 +19,6 @@ import {
   collectContext,
   planContextTools,
 } from '@/lib/ai/contextCollector'
-import { runAgentLoop, type AgentEvent } from '@/lib/agent-loop'
 import type { SupabaseClient } from '@supabase/supabase-js'
 
 const toolContext = { supabase: {} as SupabaseClient, userId: 'u1' }
@@ -29,8 +28,23 @@ function toolNames(message: string): string[] {
 }
 
 describe('planContextTools', () => {
-  it('always includes pnl stats and trade history', () => {
+  it('plans nothing for a greeting', () => {
+    expect(planContextTools('hi')).toEqual([])
+  })
+
+  it('does not match performance keywords inside other words', () => {
+    expect(planContextTools('hello there')).toEqual([])
+  })
+
+  it('plans pnl stats and trade history for performance questions', () => {
+    expect(toolNames('How is my PNL over the last 30 days?')).toEqual(['get_pnl_stats', 'get_trade_history'])
     expect(toolNames('how am I doing')).toEqual(['get_pnl_stats', 'get_trade_history'])
+  })
+
+  it('plans only market quotes for a BTC price message', () => {
+    const names = toolNames('BTC price')
+    expect(names).toContain('get_market_quotes')
+    expect(names).not.toContain('get_pnl_stats')
   })
 
   it('adds market quotes for English and Vietnamese keywords', () => {
@@ -46,7 +60,7 @@ describe('planContextTools', () => {
 
 describe('collectContext', () => {
   it('skips failed tools and marks them unavailable', async () => {
-    const plans = planContextTools('gold price')
+    const plans = planContextTools('gold price pnl')
     const outcomes = await collectContext(toolContext, plans)
     const market = outcomes.find((o) => o.plan.tool === 'get_market_quotes')
     expect(market?.result).toBeNull()
@@ -57,44 +71,8 @@ describe('collectContext', () => {
   it('bounds payload size', async () => {
     const tradeTool = await import('@/lib/tools/trade-tool')
     vi.mocked(tradeTool.getPnlStatsTool).mockResolvedValueOnce({ blob: 'x'.repeat(CONTEXT_PAYLOAD_MAX_CHARS * 2) })
-    const outcomes = await collectContext(toolContext, planContextTools('hi'))
+    const outcomes = await collectContext(toolContext, planContextTools('my pnl'))
     expect(outcomes[0].payload.length).toBeLessThan(CONTEXT_PAYLOAD_MAX_CHARS + 200)
     expect(buildContextMessage(outcomes)).toContain('tool_data')
-  })
-})
-
-describe('runAgentLoop single request', () => {
-  it('performs exactly one provider fetch and accepts finish_reason length', async () => {
-    const fetchMock = vi.fn(async () =>
-      new Response(
-        JSON.stringify({
-          choices: [{ finish_reason: 'length', message: { role: 'assistant', content: 'partial answer' } }],
-          usage: { total_tokens: 5 },
-        }),
-        { status: 200 }
-      )
-    )
-    vi.stubGlobal('fetch', fetchMock)
-    const events: AgentEvent[] = []
-
-    const result = await runAgentLoop(
-      'gold price and news',
-      [],
-      toolContext,
-      (event) => events.push(event),
-      { provider: 'openrouter', apiKey: 'k', model: 'm' } as never
-    )
-
-    expect(fetchMock).toHaveBeenCalledTimes(1)
-    const body = JSON.parse((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body as string)
-    expect(body.tools).toBeUndefined()
-    expect(body.tool_choice).toBeUndefined()
-    expect(result.success).toBe(true)
-    const types = events.map((e) => e.type)
-    expect(types[0]).toBe('thinking_start')
-    expect(types.filter((t) => t === 'tool_start').length).toBe(4)
-    expect(types.filter((t) => t === 'tool_done').length).toBe(4)
-    expect(types[types.length - 1]).toBe('done')
-    vi.unstubAllGlobals()
   })
 })

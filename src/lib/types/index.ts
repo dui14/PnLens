@@ -418,6 +418,7 @@ export type AiModelEntry = {
   id: string
   label: string
   supportsEffort: boolean
+  supportsTools?: boolean
 }
 
 export type AiProviderStatus =

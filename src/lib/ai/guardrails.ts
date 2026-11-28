@@ -4,6 +4,10 @@ export const AI_CONVERSATION_RENAMED_EVENT = 'pnlens:ai-conversation-renamed'
 export const AI_HISTORY_MAX_MESSAGES = 12
 export const AI_VALIDATION_ERROR_CODE = 'VALIDATION_ERROR'
 
+export const AGENT_MAX_TOOL_STEPS = 5
+export const AGENT_TOOL_CHOICE_AUTO = 'auto'
+export const AGENT_TOOL_CHOICE_NONE = 'none'
+
 export const TOOL_TRADE_LIMIT_DEFAULT = 20
 export const TOOL_TRADE_LIMIT_MIN = 1
 export const TOOL_TRADE_LIMIT_MAX = 50
